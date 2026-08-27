@@ -1,0 +1,1460 @@
+<!doctype html>
+<html lang="en">
+
+<head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <meta name="theme-color" content="#0d1117">
+    <title>Recovery operations · Revenue recovery</title>
+    <style>
+        :root {
+            --bg: #f4f6fa;
+            --surface: #ffffff;
+            --surface-2: #f8fafc;
+            --ink: #0f172a;
+            --ink-2: #334155;
+            --muted: #64748b;
+            --soft: #94a3b8;
+            --line: #e4e9f0;
+            --line-2: #edf1f6;
+            --navy: #0d1424;
+            --navy-2: #131c30;
+            --brand: #2563eb;
+            --brand-2: #4f7df5;
+            --brand-soft: #eef4ff;
+            --green: #0e9f6e;
+            --green-soft: #e6f8f1;
+            --amber: #d97706;
+            --amber-soft: #fef4e6;
+            --red: #dc2626;
+            --red-soft: #fef1f1;
+            --violet: #7c3aed;
+            --violet-soft: #f2eefe;
+            --shadow-sm: 0 1px 2px rgba(15, 23, 42, .05);
+            --shadow-md: 0 1px 3px rgba(15, 23, 42, .07), 0 8px 24px -12px rgba(15, 23, 42, .12);
+            --radius: 14px;
+            font-family: Inter, ui-sans-serif, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+        }
+
+        * {
+            box-sizing: border-box;
+        }
+
+        html {
+            -webkit-font-smoothing: antialiased;
+            text-rendering: optimizeLegibility;
+        }
+
+        body {
+            margin: 0;
+            background: var(--bg);
+            color: var(--ink);
+            font-size: 14px;
+            line-height: 1.5;
+        }
+
+        a {
+            color: inherit;
+            text-decoration: none;
+        }
+
+        .app {
+            display: flex;
+            min-height: 100vh;
+        }
+
+        /* ---------- Sidebar ---------- */
+        .sidebar {
+            width: 264px;
+            flex: 0 0 264px;
+            background: var(--navy);
+            color: #9aa7b9;
+            display: flex;
+            flex-direction: column;
+            position: sticky;
+            top: 0;
+            height: 100vh;
+        }
+
+        .brand {
+            height: 76px;
+            display: flex;
+            align-items: center;
+            gap: 12px;
+            padding: 0 22px;
+            border-bottom: 1px solid rgba(255, 255, 255, .07);
+            color: #fff;
+        }
+
+        .brand-mark {
+            width: 36px;
+            height: 36px;
+            display: grid;
+            place-items: center;
+            border: 1px solid rgba(111, 150, 255, .35);
+            border-radius: 10px;
+            background: linear-gradient(140deg, #3b82f6, #1e40af);
+            box-shadow: 0 8px 20px -6px rgba(37, 99, 235, .55);
+            color: #fff;
+            font-size: 11px;
+            font-weight: 800;
+            letter-spacing: -.02em;
+        }
+
+        .brand-name {
+            font-size: 14px;
+            font-weight: 700;
+            letter-spacing: -.01em;
+        }
+
+        .brand-subtitle {
+            margin-top: 2px;
+            color: #71809a;
+            font-size: 10.5px;
+        }
+
+        .brand-copy {
+            line-height: 1.2;
+        }
+
+        .nav {
+            padding: 20px 14px;
+            overflow-y: auto;
+            flex: 1;
+        }
+
+        .nav-heading {
+            padding: 0 12px 8px;
+            color: #5d6c85;
+            font-size: 10px;
+            font-weight: 700;
+            letter-spacing: .12em;
+            text-transform: uppercase;
+        }
+
+        .nav-heading:not(:first-child) {
+            margin-top: 22px;
+        }
+
+        .nav-link {
+            display: flex;
+            align-items: center;
+            gap: 11px;
+            margin: 3px 0;
+            padding: 10px 12px;
+            border: 1px solid transparent;
+            border-radius: 9px;
+            color: #93a1b6;
+            font-size: 12.5px;
+            font-weight: 500;
+            transition: background .15s, color .15s, border-color .15s;
+        }
+
+        .nav-link:hover {
+            background: rgba(255, 255, 255, .05);
+            color: #fff;
+        }
+
+        .nav-link.active {
+            border-color: rgba(111, 150, 255, .22);
+            background: linear-gradient(90deg, rgba(59, 130, 246, .18), rgba(59, 130, 246, .06));
+            color: #fff;
+            font-weight: 600;
+            box-shadow: inset 3px 0 0 var(--brand-2);
+        }
+
+        .nav-symbol {
+            width: 18px;
+            color: #6c7b93;
+            text-align: center;
+            font-size: 13px;
+        }
+
+        .active .nav-symbol {
+            color: #8ab0ff;
+        }
+
+        .side-note {
+            margin-top: auto;
+            padding: 16px 22px 20px;
+            border-top: 1px solid rgba(255, 255, 255, .07);
+            color: #5f6e86;
+            font-size: 10.5px;
+            line-height: 1.6;
+        }
+
+        .side-note strong {
+            display: block;
+            margin-bottom: 5px;
+            color: #93a1b6;
+            font-size: 10px;
+            font-weight: 700;
+            letter-spacing: .06em;
+        }
+
+        .side-note svg {
+            vertical-align: -2px;
+            margin-right: 5px;
+        }
+
+        /* ---------- Main ---------- */
+        .main {
+            min-width: 0;
+            flex: 1;
+        }
+
+        .topbar {
+            height: 76px;
+            display: flex;
+            align-items: center;
+            justify-content: flex-end;
+            gap: 22px;
+            padding: 0 40px;
+            border-bottom: 1px solid var(--line);
+            background: var(--surface);
+            position: sticky;
+            top: 0;
+            z-index: 10;
+        }
+
+        .sync {
+            display: flex;
+            align-items: center;
+            gap: 9px;
+            color: var(--muted);
+            font-size: 11.5px;
+        }
+
+        .sync-dot {
+            width: 7px;
+            height: 7px;
+            border-radius: 50%;
+            background: #16a34a;
+            box-shadow: 0 0 0 4px rgba(22, 163, 74, .12);
+            animation: pulse 2.4s ease-in-out infinite;
+        }
+
+        @keyframes pulse {
+
+            0%,
+            100% {
+                box-shadow: 0 0 0 4px rgba(22, 163, 74, .12);
+            }
+
+            50% {
+                box-shadow: 0 0 0 6px rgba(22, 163, 74, .05);
+            }
+        }
+
+        .user {
+            display: flex;
+            align-items: center;
+            gap: 10px;
+            padding-left: 22px;
+            border-left: 1px solid var(--line);
+            color: var(--muted);
+            font-size: 12px;
+        }
+
+        .avatar {
+            width: 32px;
+            height: 32px;
+            display: grid;
+            place-items: center;
+            border: 1px solid #c9d8f7;
+            border-radius: 50%;
+            background: var(--brand-soft);
+            color: var(--brand);
+            font-size: 10px;
+            font-weight: 800;
+        }
+
+        .page {
+            width: min(1440px, calc(100% - 64px));
+            margin: auto;
+            padding: 36px 0 56px;
+        }
+
+        .page-head {
+            display: flex;
+            align-items: flex-end;
+            justify-content: space-between;
+            gap: 20px;
+            margin-bottom: 28px;
+        }
+
+        .eyebrow {
+            display: flex;
+            align-items: center;
+            gap: 8px;
+            margin-bottom: 10px;
+            color: var(--brand);
+            font-size: 10.5px;
+            font-weight: 800;
+            letter-spacing: .12em;
+            text-transform: uppercase;
+        }
+
+        .eyebrow::before {
+            width: 18px;
+            height: 2px;
+            border-radius: 2px;
+            background: var(--brand);
+            content: "";
+        }
+
+        h1 {
+            margin: 0;
+            color: var(--ink);
+            font-size: 28px;
+            font-weight: 750;
+            letter-spacing: -.035em;
+        }
+
+        .description {
+            margin: 8px 0 0;
+            color: var(--muted);
+            font-size: 13.5px;
+        }
+
+        .date {
+            display: flex;
+            align-items: center;
+            gap: 9px;
+            padding: 10px 14px;
+            border: 1px solid var(--line);
+            border-radius: 10px;
+            background: var(--surface);
+            color: var(--muted);
+            font-size: 11.5px;
+            box-shadow: var(--shadow-sm);
+            white-space: nowrap;
+        }
+
+        .date-icon {
+            color: var(--brand);
+            font-size: 14px;
+        }
+
+        /* ---------- KPI grid ---------- */
+        .metrics {
+            display: grid;
+            grid-template-columns: repeat(3, 1fr);
+            gap: 16px;
+            margin-bottom: 20px;
+        }
+
+        .metric {
+            position: relative;
+            min-height: 138px;
+            padding: 20px;
+            border: 1px solid var(--line);
+            border-radius: var(--radius);
+            background: var(--surface);
+            box-shadow: var(--shadow-sm);
+            overflow: hidden;
+            transition: box-shadow .2s, transform .2s, border-color .2s;
+        }
+
+        .metric:hover {
+            box-shadow: var(--shadow-md);
+            transform: translateY(-2px);
+            border-color: #d3dbe6;
+        }
+
+        .metric.primary {
+            grid-column: span 1;
+            border-color: var(--navy);
+            background: linear-gradient(150deg, #131c30, #0d1424);
+            color: #fff;
+            box-shadow: 0 14px 32px -14px rgba(13, 20, 36, .5);
+        }
+
+        .metric.primary::after {
+            position: absolute;
+            right: -46px;
+            bottom: -58px;
+            width: 160px;
+            height: 160px;
+            border: 1px solid rgba(255, 255, 255, .16);
+            border-radius: 50%;
+            box-shadow: 0 0 0 22px rgba(255, 255, 255, .04), 0 0 0 44px rgba(255, 255, 255, .03);
+            content: "";
+            pointer-events: none;
+        }
+
+        .metric-top {
+            display: flex;
+            align-items: flex-start;
+            justify-content: space-between;
+            gap: 10px;
+        }
+
+        .metric-label {
+            color: var(--muted);
+            font-size: 11.5px;
+            font-weight: 600;
+        }
+
+        .primary .metric-label {
+            color: #a3b2c8;
+        }
+
+        .metric-icon {
+            width: 30px;
+            height: 30px;
+            display: grid;
+            place-items: center;
+            border-radius: 8px;
+            background: var(--brand-soft);
+            color: var(--brand);
+            font-size: 14px;
+            flex: 0 0 auto;
+        }
+
+        .primary .metric-icon {
+            background: rgba(255, 255, 255, .1);
+            color: #9db9ff;
+        }
+
+        .metric-value {
+            display: flex;
+            align-items: baseline;
+            gap: 6px;
+            margin-top: 16px;
+            color: var(--ink);
+            font-size: 26px;
+            font-weight: 750;
+            letter-spacing: -.04em;
+            line-height: 1;
+        }
+
+        .primary .metric-value {
+            color: #fff;
+            font-size: 28px;
+        }
+
+        .metric-help {
+            display: block;
+            margin-top: 9px;
+            color: var(--soft);
+            font-size: 10.5px;
+        }
+
+        .primary .metric-help {
+            color: #8b9cb4;
+        }
+
+        .metric-ratio {
+            color: var(--soft);
+            font-size: 14px;
+            font-weight: 600;
+            letter-spacing: -.01em;
+        }
+
+        .spark {
+            display: block;
+            margin-top: 14px;
+            width: 100%;
+            height: 36px;
+        }
+
+        .spark polyline {
+            fill: none;
+            stroke: var(--brand);
+            stroke-width: 2;
+            stroke-linecap: round;
+            stroke-linejoin: round;
+        }
+
+        .spark-primary polyline {
+            stroke: #7ea2ff;
+        }
+
+        /* ---------- Panels ---------- */
+        .grid {
+            display: grid;
+            grid-template-columns: 1.6fr 1fr;
+            gap: 20px;
+            margin-bottom: 20px;
+        }
+
+        .card {
+            border: 1px solid var(--line);
+            border-radius: var(--radius);
+            background: var(--surface);
+            box-shadow: var(--shadow-sm);
+            overflow: hidden;
+        }
+
+        .card-head {
+            display: flex;
+            align-items: center;
+            justify-content: space-between;
+            gap: 15px;
+            padding: 18px 22px;
+            border-bottom: 1px solid var(--line-2);
+        }
+
+        .card-title {
+            margin: 0;
+            color: var(--ink);
+            font-size: 13.5px;
+            font-weight: 750;
+            letter-spacing: -.01em;
+        }
+
+        .card-description {
+            margin: 4px 0 0;
+            color: var(--muted);
+            font-size: 11.5px;
+        }
+
+        .card-action {
+            display: inline-flex;
+            align-items: center;
+            gap: 6px;
+            padding: 5px 10px;
+            border-radius: 999px;
+            background: var(--surface-2);
+            border: 1px solid var(--line);
+            color: var(--ink-2);
+            font-size: 11px;
+            font-weight: 650;
+            white-space: nowrap;
+        }
+
+        .card-body {
+            padding: 20px 22px;
+        }
+
+        .breakdown {
+            display: grid;
+            gap: 20px;
+        }
+
+        .breakdown-item {
+            display: grid;
+            grid-template-columns: 150px 1fr 44px;
+            align-items: center;
+            gap: 14px;
+        }
+
+        .breakdown-name {
+            color: var(--ink-2);
+            font-size: 11.5px;
+            font-weight: 550;
+        }
+
+        .track {
+            height: 8px;
+            overflow: hidden;
+            border-radius: 6px;
+            background: #e9edf3;
+        }
+
+        .fill {
+            height: 100%;
+            border-radius: inherit;
+            background: linear-gradient(90deg, var(--brand), var(--brand-2));
+            transition: width .6s ease;
+        }
+
+        .fill.amber {
+            background: linear-gradient(90deg, #f59e0b, #d97706);
+        }
+
+        .fill.violet {
+            background: linear-gradient(90deg, #8b5cf6, #7c3aed);
+        }
+
+        .breakdown-number {
+            color: var(--ink);
+            font-size: 12px;
+            font-weight: 750;
+            text-align: right;
+        }
+
+        .breakdown-legend {
+            display: grid;
+            gap: 10px;
+            margin-top: 22px;
+            padding-top: 18px;
+            border-top: 1px solid var(--line-2);
+        }
+
+        .legend-row {
+            display: flex;
+            align-items: center;
+            gap: 10px;
+            font-size: 11.5px;
+        }
+
+        .legend-swatch {
+            width: 9px;
+            height: 9px;
+            border-radius: 3px;
+            flex: 0 0 auto;
+        }
+
+        .legend-name {
+            color: var(--ink-2);
+        }
+
+        .legend-value {
+            margin-left: auto;
+            color: var(--ink);
+            font-weight: 700;
+        }
+
+        /* ---------- Donut ---------- */
+        .donut-wrap {
+            display: flex;
+            align-items: center;
+            gap: 26px;
+            padding: 22px;
+        }
+
+        .donut {
+            position: relative;
+            width: 150px;
+            height: 150px;
+            flex: 0 0 auto;
+        }
+
+        .donut svg {
+            width: 100%;
+            height: 100%;
+            transform: rotate(-90deg);
+        }
+
+        .donut-center {
+            position: absolute;
+            inset: 0;
+            display: grid;
+            place-content: center;
+            text-align: center;
+        }
+
+        .donut-total {
+            font-size: 24px;
+            font-weight: 780;
+            letter-spacing: -.04em;
+            line-height: 1.1;
+        }
+
+        .donut-label {
+            color: var(--muted);
+            font-size: 10px;
+            margin-top: 2px;
+        }
+
+        .mix-legend {
+            display: grid;
+            gap: 12px;
+            flex: 1;
+            min-width: 0;
+        }
+
+        .mix-row {
+            display: grid;
+            grid-template-columns: 12px 1fr auto;
+            align-items: center;
+            gap: 9px;
+            font-size: 12px;
+        }
+
+        .mix-dot {
+            width: 9px;
+            height: 9px;
+            border-radius: 50%;
+        }
+
+        .mix-name {
+            color: var(--ink-2);
+            white-space: nowrap;
+            overflow: hidden;
+            text-overflow: ellipsis;
+        }
+
+        .mix-count {
+            color: var(--ink);
+            font-weight: 700;
+        }
+
+        .mix-pct {
+            color: var(--soft);
+            font-size: 11px;
+            text-align: right;
+            min-width: 40px;
+        }
+
+        /* ---------- Review list ---------- */
+        .review-list {
+            padding: 6px 22px 14px;
+        }
+
+        .review-item {
+            display: flex;
+            align-items: center;
+            gap: 12px;
+            min-height: 62px;
+            border-bottom: 1px solid var(--line-2);
+        }
+
+        .review-item:last-child {
+            border-bottom: 0;
+        }
+
+        .review-indicator {
+            width: 8px;
+            height: 8px;
+            flex: 0 0 auto;
+            border-radius: 50%;
+            background: var(--red);
+            box-shadow: 0 0 0 4px var(--red-soft);
+        }
+
+        .review-indicator.clear {
+            background: var(--green);
+            box-shadow: 0 0 0 4px var(--green-soft);
+        }
+
+        .review-content {
+            min-width: 0;
+            flex: 1;
+        }
+
+        .review-name {
+            display: block;
+            overflow: hidden;
+            color: var(--ink);
+            font-size: 12px;
+            font-weight: 650;
+            text-overflow: ellipsis;
+            white-space: nowrap;
+        }
+
+        .review-reason {
+            display: block;
+            overflow: hidden;
+            margin-top: 3px;
+            color: var(--muted);
+            font-size: 11px;
+            text-overflow: ellipsis;
+            white-space: nowrap;
+        }
+
+        .review-arrow {
+            color: #a7b1bf;
+            font-size: 20px;
+            font-weight: 300;
+        }
+
+        /* ---------- Funnel ---------- */
+        .funnel {
+            display: grid;
+            gap: 8px;
+        }
+
+        .funnel-row {
+            display: grid;
+            grid-template-columns: 120px 1fr auto;
+            align-items: center;
+            gap: 12px;
+        }
+
+        .funnel-label {
+            color: var(--ink-2);
+            font-size: 11.5px;
+            font-weight: 550;
+        }
+
+        .funnel-track {
+            height: 22px;
+            border-radius: 7px;
+            background: #eef1f6;
+            overflow: hidden;
+        }
+
+        .funnel-fill {
+            height: 100%;
+            border-radius: 7px;
+            display: flex;
+            align-items: center;
+            justify-content: flex-end;
+            padding-right: 8px;
+            color: #fff;
+            font-size: 10px;
+            font-weight: 700;
+            letter-spacing: .02em;
+            transition: width .6s ease;
+        }
+
+        .funnel-fill.brand {
+            background: linear-gradient(90deg, #3b82f6, #2563eb);
+        }
+
+        .funnel-fill.green {
+            background: linear-gradient(90deg, #10b981, #0e9f6e);
+        }
+
+        .funnel-fill.amber {
+            background: linear-gradient(90deg, #f59e0b, #d97706);
+        }
+
+        .funnel-fill.red {
+            background: linear-gradient(90deg, #ef4444, #dc2626);
+        }
+
+        .funnel-value {
+            color: var(--ink);
+            font-size: 12px;
+            font-weight: 750;
+            min-width: 64px;
+            text-align: right;
+        }
+
+        /* ---------- Reasons ---------- */
+        .reason-list {
+            display: grid;
+            gap: 16px;
+        }
+
+        .reason-row {
+            display: grid;
+            grid-template-columns: 1fr 1fr auto;
+            gap: 12px;
+            align-items: center;
+        }
+
+        .reason-label {
+            color: var(--ink-2);
+            font-size: 11.5px;
+            font-weight: 550;
+            overflow: hidden;
+            text-overflow: ellipsis;
+            white-space: nowrap;
+        }
+
+        .reason-track {
+            height: 7px;
+            border-radius: 5px;
+            background: #e9edf3;
+            overflow: hidden;
+        }
+
+        .reason-fill {
+            height: 100%;
+            border-radius: inherit;
+            background: linear-gradient(90deg, #8b5cf6, #7c3aed);
+            transition: width .6s ease;
+        }
+
+        .reason-count {
+            color: var(--ink);
+            font-size: 12px;
+            font-weight: 700;
+            min-width: 30px;
+            text-align: right;
+        }
+
+        .empty {
+            padding: 42px;
+            color: var(--muted);
+            text-align: center;
+            font-size: 12.5px;
+        }
+
+        /* ---------- Table ---------- */
+        .activity {
+            overflow: hidden;
+            margin-bottom: 14px;
+        }
+
+        .table-wrap {
+            overflow-x: auto;
+        }
+
+        table {
+            width: 100%;
+            min-width: 860px;
+            border-collapse: collapse;
+        }
+
+        th {
+            padding: 12px 22px;
+            border-bottom: 1px solid var(--line);
+            background: #fafbfd;
+            color: var(--soft);
+            font-size: 10px;
+            font-weight: 750;
+            letter-spacing: .08em;
+            text-align: left;
+            text-transform: uppercase;
+        }
+
+        td {
+            padding: 14px 22px;
+            border-bottom: 1px solid var(--line-2);
+            font-size: 12px;
+            vertical-align: middle;
+        }
+
+        tbody tr:last-child td {
+            border-bottom: 0;
+        }
+
+        tbody tr {
+            transition: background .12s;
+        }
+
+        tbody tr:hover {
+            background: #f8fafd;
+        }
+
+        .client-name {
+            display: block;
+            color: var(--ink);
+            font-weight: 650;
+        }
+
+        .client-id {
+            display: block;
+            margin-top: 3px;
+            color: var(--soft);
+            font-family: ui-monospace, SFMono-Regular, Consolas, monospace;
+            font-size: 10.5px;
+        }
+
+        .pill {
+            display: inline-flex;
+            align-items: center;
+            gap: 5px;
+            padding: 5px 9px;
+            border-radius: 7px;
+            font-size: 10.5px;
+            font-weight: 650;
+            white-space: nowrap;
+        }
+
+        .pill::before {
+            width: 5px;
+            height: 5px;
+            border-radius: 50%;
+            background: currentColor;
+            content: "";
+            opacity: .65;
+        }
+
+        .pill.blue {
+            background: var(--brand-soft);
+            color: #2563eb;
+        }
+
+        .pill.green {
+            background: var(--green-soft);
+            color: var(--green);
+        }
+
+        .pill.amber {
+            background: var(--amber-soft);
+            color: var(--amber);
+        }
+
+        .pill.red {
+            background: var(--red-soft);
+            color: var(--red);
+        }
+
+        .pill.violet {
+            background: var(--violet-soft);
+            color: var(--violet);
+        }
+
+        .pill.gray {
+            background: #f1f3f6;
+            color: #5b6b7f;
+        }
+
+        .error {
+            display: block;
+            max-width: 260px;
+            margin-top: 5px;
+            color: var(--red);
+            font-size: 10.5px;
+            line-height: 1.4;
+        }
+
+        .footer {
+            color: var(--soft);
+            font-size: 11px;
+            text-align: right;
+        }
+
+        /* ---------- Responsive ---------- */
+        @media (max-width: 1240px) {
+            .metrics {
+                grid-template-columns: repeat(2, 1fr);
+            }
+
+            .grid {
+                grid-template-columns: 1fr;
+            }
+        }
+
+        @media (max-width: 900px) {
+            .sidebar {
+                display: none;
+            }
+
+            .topbar {
+                padding: 0 22px;
+            }
+
+            .page {
+                width: calc(100% - 40px);
+                padding-top: 28px;
+            }
+        }
+
+        @media (max-width: 620px) {
+            .metrics {
+                grid-template-columns: 1fr;
+            }
+
+            .page {
+                width: calc(100% - 24px);
+            }
+
+            .page-head {
+                align-items: flex-start;
+                flex-direction: column;
+            }
+
+            .breakdown-item {
+                grid-template-columns: 108px 1fr 30px;
+                gap: 9px;
+            }
+
+            .donut-wrap {
+                flex-direction: column;
+                align-items: center;
+            }
+
+            .mix-legend {
+                width: 100%;
+            }
+
+            h1 {
+                font-size: 24px;
+            }
+        }
+    </style>
+</head>
+
+<body>
+    <div class="app">
+        <aside class="sidebar">
+            <div class="brand">
+                <span class="brand-mark">RR</span>
+                <div class="brand-copy">
+                    <div class="brand-name">Revenue recovery</div>
+                    <div class="brand-subtitle">Operations console</div>
+                </div>
+            </div>
+            <nav class="nav" aria-label="Primary navigation">
+                <div class="nav-heading">Workspace</div>
+                <a class="nav-link active" href="/dashboard"><span class="nav-symbol">▦</span>Overview</a>
+                <a class="nav-link" href="/clients"><span class="nav-symbol">◍</span>Clients</a>
+                <a class="nav-link" href="#cases"><span class="nav-symbol">≡</span>Case activity</a>
+                <a class="nav-link" href="#review"><span class="nav-symbol">!</span>Needs attention</a>
+                <div class="nav-heading">Sources</div>
+                <a class="nav-link" href="#cases"><span class="nav-symbol">○</span>Appointments</a>
+                <a class="nav-link" href="#cases"><span class="nav-symbol">₹</span>Memberships</a>
+            </nav>
+            <div class="side-note">
+                <strong>OWNER OPERATIONS WORKSPACE</strong>
+                <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                    <circle cx="12" cy="12" r="10"></circle>
+                    <path d="M12 16v-4M12 8h.01"></path>
+                </svg>
+                Data is taken directly from the recovery audit log.
+            </div>
+        </aside>
+        <div class="main">
+            <header class="topbar">
+                <span class="sync"><span class="sync-dot"></span>Audit data current</span>
+                <span class="user"><span class="avatar">OP</span>Operations</span>
+            </header>
+            <main class="page">
+                <section class="page-head">
+                    <div>
+                        <div class="eyebrow">Operations overview</div>
+                        <h1>Revenue recovery</h1>
+                        <p class="description">Monitor missed appointments and failed membership payments requiring
+                            follow-up.</p>
+                    </div>
+                    <div class="date"><span class="date-icon">◷</span>Operations workspace</div>
+                </section>
+
+                <section class="metrics" aria-label="Recovery performance">
+                    <div class="metric primary">
+                        <div class="metric-top">
+                            <span class="metric-label">Revenue recovered</span>
+                            <span class="metric-icon">₹</span>
+                        </div>
+                        <strong class="metric-value">{{ '%.2f'|format(metrics.revenue_recovered) }}</strong>
+                        <span class="metric-help">Paid or recovered cases</span>
+                        {% if metrics.revenue_series %}
+                        <svg class="spark spark-primary" viewBox="0 0 116 36" preserveAspectRatio="none"
+                            aria-hidden="true">
+                            <polyline points="{{ metrics.revenue_dots|map('join', ',')|join(' ') }}"></polyline>
+                        </svg>
+                        {% endif %}
+                    </div>
+                    <div class="metric">
+                        <div class="metric-top">
+                            <span class="metric-label">Cases processed</span>
+                            <span class="metric-icon">≡</span>
+                        </div>
+                        <strong class="metric-value">{{ metrics.cases_processed }}</strong>
+                        <span class="metric-help">All sources combined</span>
+                        {% if metrics.activity_series %}
+                        <svg class="spark" viewBox="0 0 116 36" preserveAspectRatio="none" aria-hidden="true">
+                            <polyline points="{{ metrics.activity_points }}"></polyline>
+                        </svg>
+                        {% endif %}
+                    </div>
+                    <div class="metric">
+                        <div class="metric-top">
+                            <span class="metric-label">Fees collected</span>
+                            <span class="metric-icon">✓</span>
+                        </div>
+                        <strong class="metric-value">{{ metrics.fees_paid }} <span class="metric-ratio">/ {{
+                                metrics.fees_sent }}</span></strong>
+                        <span class="metric-help">{{ metrics.fee_collection_rate }}% collection rate</span>
+                    </div>
+                    <div class="metric">
+                        <div class="metric-top">
+                            <span class="metric-label">Memberships saved</span>
+                            <span class="metric-icon">♺</span>
+                        </div>
+                        <strong class="metric-value">{{ metrics.subscriptions_recovered }} <span class="metric-ratio">/
+                                {{ metrics.subscriptions_retried }}</span></strong>
+                        <span class="metric-help">{{ metrics.recovery_rate }}% recovery rate</span>
+                    </div>
+                    <div class="metric">
+                        <div class="metric-top">
+                            <span class="metric-label">Slots refilled</span>
+                            <span class="metric-icon">○</span>
+                        </div>
+                        <strong class="metric-value">{{ metrics.slots_refilled }}</strong>
+                        <span class="metric-help">Waitlist matches · {{ metrics.refill_rate }}% of cases</span>
+                    </div>
+                    <div class="metric">
+                        <div class="metric-top">
+                            <span class="metric-label">Needs review</span>
+                            <span class="metric-icon">!</span>
+                        </div>
+                        <strong class="metric-value">{{ metrics.escalations }}</strong>
+                        <span class="metric-help">Owner follow-up required</span>
+                    </div>
+                </section>
+
+                <section class="grid">
+                    <article class="card">
+                        <div class="card-head">
+                            <div>
+                                <h2 class="card-title">Case volume</h2>
+                                <p class="card-description">Breakdown of cases recorded in the audit log</p>
+                            </div>
+                            <span class="card-action">{{ metrics.cases_processed }} total</span>
+                        </div>
+                        {% set no_shows = cases|selectattr('event_type', 'equalto', 'no_show')|list|length %}{% set
+                        cancellations = cases|selectattr('event_type', 'equalto', 'calendar_cancellation')|list|length
+                        %}{% set subscriptions = cases|selectattr('event_type', 'equalto',
+                        'failed_subscription')|list|length %}{% set total = metrics.cases_processed or 1 %}
+                        <div class="card-body">
+                            <div class="breakdown">
+                                <div class="breakdown-item"><span class="breakdown-name">Missed appointments</span>
+                                    <div class="track">
+                                        <div class="fill" style="width: {{ (no_shows / total * 100)|round(0) }}%"></div>
+                                    </div><span class="breakdown-number">{{ no_shows }}</span>
+                                </div>
+                                <div class="breakdown-item"><span class="breakdown-name">Cancelled slots</span>
+                                    <div class="track">
+                                        <div class="fill amber"
+                                            style="width: {{ (cancellations / total * 100)|round(0) }}%"></div>
+                                    </div><span class="breakdown-number">{{ cancellations }}</span>
+                                </div>
+                                <div class="breakdown-item"><span class="breakdown-name">Failed memberships</span>
+                                    <div class="track">
+                                        <div class="fill violet"
+                                            style="width: {{ (subscriptions / total * 100)|round(0) }}%">
+                                        </div>
+                                    </div><span class="breakdown-number">{{ subscriptions }}</span>
+                                </div>
+                            </div>
+                            <div class="breakdown-legend">
+                                <div class="legend-row"><span class="legend-swatch"
+                                        style="background:#0e9f6e"></span><span class="legend-name">Healthy
+                                        records</span><span class="legend-value">{{
+                                        metrics.healthy }}</span></div>
+                                <div class="legend-row"><span class="legend-swatch"
+                                        style="background:#dc2626"></span><span class="legend-name">Flagged
+                                        errors</span><span class="legend-value">{{
+                                        metrics.flagged }}</span></div>
+                            </div>
+                        </div>
+                    </article>
+
+                    <article class="card" id="review">
+                        <div class="card-head">
+                            <div>
+                                <h2 class="card-title">Needs your attention</h2>
+                                <p class="card-description">Cases that need an owner decision</p>
+                            </div>
+                            <span class="card-action">{{ metrics.escalations }} open</span>
+                        </div>
+                        <div class="review-list">{% for flag in review_flags[:3] %}<div class="review-item"><span
+                                class="review-indicator"></span>
+                            <div class="review-content"><span class="review-name">{{ flag.client_id }}</span><span
+                                    class="review-reason">{{ flag.reason }}</span></div><span class="review-arrow">›</span>
+                        </div>{% else %}<div class="review-item"><span class="review-indicator clear"></span>
+                            <div class="review-content"><span class="review-name">No cases waiting for review</span><span
+                                    class="review-reason">Everything is up to date.</span></div>
+                        </div>{% endfor %}</div>
+                        {% if review_flags %}<div class="card-body"><strong>Open owner flags</strong>{% for flag in review_flags %}<div
+                                class="review-item">
+                                <div class="review-content"><span class="review-name">{{ flag.client_id }}</span><span
+                                        class="review-reason">{{ flag.reason }}</span></div>
+                                <form method="post" action="/dashboard/review/{{ flag.id }}/resolve"><input type="hidden"
+                                        name="csrf_token" value="{{ csrf_token }}"><button type="submit">Acknowledge</button></form>
+                            </div>{% endfor %}</div>{% endif %}
+        </article>
+        </section>
+
+        <section class="card" id="waitlist" aria-label="Waitlist controls">
+            <div class="card-head">
+                <div>
+                    <h2 class="card-title">Waitlist controls</h2>
+                    <p class="card-description">Manage recipients and slot state</p>
+                </div>
+            </div>
+            <div class="card-body">
+                <p>Next in line: {{ next_waitlist.client_name if next_waitlist else 'No waiting client' }}</p>
+                {% for person in waitlist %}
+                <form method="post" action="/dashboard/waitlist/{{ person.id }}" class="review-item"><input type="hidden"
+                    name="csrf_token" value="{{ csrf_token }}">
+                    <input name="client_id" value="{{ person.client_id }}" required><input name="client_name"
+                        value="{{ person.client_name }}" required><input name="client_email" type="email"
+                        value="{{ person.client_email }}" required><input type="hidden" name="status"
+                        value="{{ person.status }}"><button type="submit">Save row</button>
+                </form>
+                {% endfor %}
+                <form method="post" action="/dashboard/waitlist"><input type="hidden" name="csrf_token"
+                    value="{{ csrf_token }}"><input name="client_id" placeholder="Client ID"
+                        required><input name="client_name" placeholder="Name" required><input name="client_email"
+                        type="email" placeholder="Email" required><button type="submit">Add client</button></form>
+                <form method="post" action="/dashboard/waitlist/slot"><input type="hidden" name="csrf_token"
+                    value="{{ csrf_token }}"><select name="status">
+                        <option value="open">Open</option>
+                        <option value="filled">Filled</option>
+                    </select><button type="submit">Update slot</button></form>
+            </div>
+        </section>
+
+        <section class="grid">
+            <article class="card">
+                <div class="card-head">
+                    <div>
+                        <h2 class="card-title">Case mix</h2>
+                        <p class="card-description">Distribution across recovery channels</p>
+                    </div>
+                </div>
+                <div class="donut-wrap">
+                    <div class="donut">
+                        <svg viewBox="0 0 100 100" aria-hidden="true">
+                            <circle cx="50" cy="50" r="42" fill="none" stroke="#eef1f6" stroke-width="12"></circle>
+                            {% for segment in metrics.mix.segments %}
+                            <circle cx="50" cy="50" r="42" fill="none" stroke="{{ segment.color }}" stroke-width="12"
+                                stroke-linecap="butt"
+                                stroke-dasharray="{{ segment.dash }} {{ metrics.mix.circumference }}"
+                                stroke-dashoffset="{{ segment.offset }}"></circle>
+                            {% endfor %}
+                        </svg>
+                        <div class="donut-center">
+                            <div class="donut-total">{{ metrics.mix.total }}</div>
+                            <div class="donut-label">total cases</div>
+                        </div>
+                    </div>
+                    <div class="mix-legend">
+                        {% for segment in metrics.mix.segments %}
+                        <div class="mix-row">
+                            <span class="mix-dot" style="background:{{ segment.color }}"></span>
+                            <span class="mix-name">{{ segment.label }}</span>
+                            <span class="mix-count">{{ segment.count }}</span>
+                            <span class="mix-pct">{{ segment.frac }}%</span>
+                        </div>
+                        {% endfor %}
+                    </div>
+                </div>
+            </article>
+
+            <article class="card">
+                <div class="card-head">
+                    <div>
+                        <h2 class="card-title">Recovery funnel</h2>
+                        <p class="card-description">Action outcomes by source</p>
+                    </div>
+                </div>
+                <div class="card-body">
+                    {% set total_actions = metrics.success_actions + metrics.escalations %}
+                    <div class="funnel">
+                        <div class="funnel-row">
+                            <span class="funnel-label">Fees sent</span>
+                            <div class="funnel-track">
+                                <div class="funnel-fill brand"
+                                    style="width: {{ (metrics.fees_sent / (total_actions or 1) * 100)|round(0) }}%">{{
+                                    metrics.fees_sent }}</div>
+                            </div>
+                            <span class="funnel-value">{{ metrics.fees_paid }} paid</span>
+                        </div>
+                        <div class="funnel-row">
+                            <span class="funnel-label">Retries run</span>
+                            <div class="funnel-track">
+                                <div class="funnel-fill green"
+                                    style="width: {{ (metrics.subscriptions_retried / (total_actions or 1) * 100)|round(0) }}%">
+                                    {{ metrics.subscriptions_retried }}</div>
+                            </div>
+                            <span class="funnel-value">{{ metrics.subscriptions_recovered }} saved</span>
+                        </div>
+                        <div class="funnel-row">
+                            <span class="funnel-label">Waitlist</span>
+                            <div class="funnel-track">
+                                <div class="funnel-fill amber"
+                                    style="width: {{ (metrics.slots_refilled / (total_actions or 1) * 100)|round(0) }}%">
+                                    {{ metrics.slots_refilled }}</div>
+                            </div>
+                            <span class="funnel-value">{{ metrics.slots_refilled }} refills</span>
+                        </div>
+                        <div class="funnel-row">
+                            <span class="funnel-label">Escalated</span>
+                            <div class="funnel-track">
+                                <div class="funnel-fill red"
+                                    style="width: {{ (metrics.escalations / (total_actions or 1) * 100)|round(0) }}%">{{
+                                    metrics.escalations }}</div>
+                            </div>
+                            <span class="funnel-value">needs owner</span>
+                        </div>
+                    </div>
+                </div>
+            </article>
+        </section>
+
+        <section class="grid">
+            <article class="card">
+                <div class="card-head">
+                    <div>
+                        <h2 class="card-title">Failure reasons</h2>
+                        <p class="card-description">Why memberships fail, by volume</p>
+                    </div>
+                </div>
+                <div class="card-body">
+                    {% set max_reason = metrics.reason_breakdown[0].count if metrics.reason_breakdown else 1 %}
+                    {% if metrics.reason_breakdown %}
+                    <div class="reason-list">
+                        {% for reason in metrics.reason_breakdown[:5] %}
+                        <div class="reason-row">
+                            <span class="reason-label">{{ reason.label }}</span>
+                            <div class="reason-track">
+                                <div class="reason-fill"
+                                    style="width: {{ (reason.count / max_reason * 100)|round(0) }}%"></div>
+                            </div>
+                            <span class="reason-count">{{ reason.count }}</span>
+                        </div>
+                        {% endfor %}
+                    </div>
+                    {% else %}
+                    <div class="empty">No failed membership cases recorded.</div>
+                    {% endif %}
+                </div>
+            </article>
+
+            <article class="card">
+                <div class="card-head">
+                    <div>
+                        <h2 class="card-title">Health status</h2>
+                        <p class="card-description">Data quality across the audit log</p>
+                    </div>
+                    <span class="card-action">{{ metrics.clean_rate }}% clean</span>
+                </div>
+                <div class="card-body">
+                    <div class="breakdown">
+                        <div class="breakdown-item"><span class="breakdown-name">Clean records</span>
+                            <div class="track">
+                                <div class="fill" style="width: {{ metrics.clean_rate }}%"></div>
+                            </div><span class="breakdown-number">{{ metrics.healthy }}</span>
+                        </div>
+                        <div class="breakdown-item"><span class="breakdown-name">Flagged errors</span>
+                            <div class="track">
+                                <div class="fill amber" style="width: {{ 100 - metrics.clean_rate }}%"></div>
+                            </div><span class="breakdown-number">{{ metrics.flagged }}</span>
+                        </div>
+                    </div>
+                </div>
+            </article>
+        </section>
+
+
+        <section class="card activity" id="cases" aria-label="Case outcomes">
+            <div class="card-head">
+                <div>
+                    <h2 class="card-title">Case outcomes</h2>
+                    <p class="card-description">Actions recorded in the recovery audit log</p>
+                </div>
+                <span class="card-action">{{ cases|length }} records</span>
+            </div>
+            <div class="table-wrap">
+                <table>
+                    <thead>
+                        <tr>
+                            <th>Client</th>
+                            <th>Risk signal</th>
+                            <th>Action taken</th>
+                            <th>Payment state</th>
+                            <th>Result</th>
+                        </tr>
+                    </thead>
+                    <tbody>{% for case in cases|reverse %}<tr>
+                            <td><span class="client-name">{{ case.client_name or 'Unknown client' }}</span><span
+                                    class="client-id">{{ case.client_id }}</span></td>
+                            <td><span class="pill blue">{{ case.event_type|replace('_', ' ')|title }}</span></td>
+                            <td><span
+                                    class="pill {% if case.action == 'escalate_human' %}red{% else %}green{% endif %}">{{
+                                    case.action|replace('_', ' ')|title }}</span>
+                                {% if case.action == 'escalate_human' %}<form method="post"
+                                    action="/dashboard/cases/retry"><input type="hidden" name="csrf_token"
+                                        value="{{ csrf_token }}"><input type="hidden" name="event_json" value='{{ case.event_json }}'><button
+                                        type="submit">Request retry</button>
+                                </form>{% endif %}</td>
+                            <td><span class="pill gray">{{ case.payment_status|replace('_', ' ')|title }}</span></td>
+                            <td><span
+                                    class="pill {% if case.status == 'flagged_error' %}red{% else %}green{% endif %}">{{
+                                    case.status|replace('_', ' ')|title }}</span>{% if case.errors %}<span
+                                    class="error">{{ case.errors }}</span>{% endif %}</td>
+                        </tr>{% else %}<tr>
+                            <td colspan="5" class="empty">No activity recorded yet.</td>
+                        </tr>{% endfor %}</tbody>
+                </table>
+            </div>
+        </section>
+        <p class="footer">Operational view · Audit data is transactionally stored; owner and waitlist actions are
+            available above.</p>
+        </main>
+    </div>
+    </div>
+</body>
+
+</html>

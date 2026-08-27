@@ -1,0 +1,108 @@
+.button {
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    gap: 7px;
+    height: 34px;
+    padding: 0 14px;
+    border-radius: var(--r-sm);
+    border: 1px solid transparent;
+    font-size: 12.5px;
+    font-weight: 650;
+    white-space: nowrap;
+    transition: background var(--fast), border-color var(--fast), box-shadow var(--fast), transform var(--fast), color var(--fast);
+}
+
+.primary {
+    background: var(--brand);
+    border-color: var(--brand);
+    color: #fff;
+    box-shadow: 0 1px 2px rgba(11, 18, 32, .16), inset 0 1px 0 rgba(255, 255, 255, .16);
+}
+
+.primary:hover {
+    background: var(--brand-hover);
+    border-color: var(--brand-hover);
+    transform: translateY(-1px);
+    box-shadow: 0 6px 16px var(--brand-ring);
+}
+
+.primary:active {
+    transform: translateY(0);
+    box-shadow: 0 1px 2px rgba(11, 18, 32, .2);
+}
+
+.sendingState {
+    background: var(--brand-soft);
+    border-color: color-mix(in srgb, var(--brand) 30%, transparent);
+    color: var(--brand);
+    cursor: progress;
+}
+
+.blocked {
+    background: transparent;
+    border-color: var(--line);
+    border-style: dashed;
+    color: var(--ink-3);
+    cursor: help;
+    font-weight: 550;
+}
+
+.spin {
+    animation: spin .7s linear infinite;
+}
+
+@keyframes spin {
+    to {
+        transform: rotate(360deg);
+    }
+}
+
+/* ---- sent state ---------------------------------------------------------- */
+
+.sentWrap {
+    display: inline-flex;
+    align-items: center;
+    gap: 10px;
+}
+
+.sentPill {
+    display: inline-flex;
+    align-items: center;
+    gap: 7px;
+    height: 34px;
+    padding: 0 12px;
+    border-radius: var(--r-sm);
+    background: var(--ok-soft);
+    border: 1px solid color-mix(in srgb, var(--ok) 26%, transparent);
+    color: var(--ok);
+    font-size: 12.5px;
+    cursor: default;
+}
+
+.sentText {
+    font-weight: 550;
+    white-space: nowrap;
+}
+
+.sentText strong {
+    font-weight: 700;
+}
+
+.resend {
+    padding: 2px 1px;
+    border: 0;
+    background: none;
+    color: var(--ink-2);
+    font-size: 12px;
+    font-weight: 600;
+    text-decoration: underline;
+    text-decoration-color: color-mix(in srgb, var(--ink-2) 35%, transparent);
+    text-underline-offset: 3px;
+    transition: color var(--fast), text-decoration-color var(--fast);
+}
+
+.resend:hover {
+    color: var(--brand);
+    text-decoration-color: var(--brand);
+}

@@ -1,0 +1,10 @@
+venv/
+.env
+credentials.json
+token.json
+__pycache__/
+.pytest_cache/
+*.py[cod]
+*.sqlite3
+logs/*
+!logs/.gitkeep

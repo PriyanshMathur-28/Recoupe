@@ -1,0 +1,117 @@
+.bar {
+    position: fixed;
+    left: 50%;
+    bottom: 26px;
+    z-index: 30;
+    display: flex;
+    align-items: center;
+    gap: 12px;
+    padding: 10px 12px 10px 18px;
+    border-radius: 999px;
+    border: 1px solid var(--line-strong);
+    background: var(--surface);
+    box-shadow: var(--sh-4);
+    transform: translate(-50%, 130%);
+    opacity: 0;
+    visibility: hidden;
+    transition: transform var(--slow), opacity var(--mid), visibility var(--mid);
+}
+
+.barOpen {
+    transform: translate(-50%, 0);
+    opacity: 1;
+    visibility: visible;
+}
+
+.count {
+    font-size: 13px;
+    color: var(--ink-2);
+    white-space: nowrap;
+}
+
+.count strong {
+    color: var(--ink);
+    font-weight: 750;
+}
+
+.divider {
+    width: 1px;
+    height: 20px;
+    background: var(--line);
+}
+
+.clear {
+    display: inline-flex;
+    align-items: center;
+    gap: 6px;
+    height: 32px;
+    padding: 0 12px;
+    border-radius: 999px;
+    border: 1px solid transparent;
+    background: transparent;
+    color: var(--ink-2);
+    font-size: 12.5px;
+    font-weight: 620;
+    transition: background var(--fast), color var(--fast), border-color var(--fast);
+}
+
+.clear:hover:not(:disabled) {
+    background: var(--surface-3);
+    border-color: var(--line);
+    color: var(--ink);
+}
+
+.send {
+    display: inline-flex;
+    align-items: center;
+    gap: 7px;
+    height: 34px;
+    padding: 0 16px;
+    border-radius: 999px;
+    border: 0;
+    background: var(--brand);
+    color: #fff;
+    font-size: 12.5px;
+    font-weight: 680;
+    letter-spacing: -.005em;
+    white-space: nowrap;
+    box-shadow: var(--sh-2);
+    transition: background var(--fast), transform var(--fast), box-shadow var(--fast);
+}
+
+.send:hover:not(:disabled) {
+    background: var(--brand-hover);
+    transform: translateY(-1px);
+    box-shadow: var(--sh-3);
+}
+
+.send:active:not(:disabled) {
+    transform: none;
+}
+
+.send:disabled,
+.clear:disabled {
+    opacity: .6;
+    cursor: not-allowed;
+}
+
+@media (max-width: 620px) {
+    .bar {
+        left: 12px;
+        right: 12px;
+        bottom: 12px;
+        border-radius: var(--r-lg);
+        transform: translateY(130%);
+        flex-wrap: wrap;
+        justify-content: center;
+        padding: 12px;
+    }
+
+    .barOpen {
+        transform: none;
+    }
+
+    .divider {
+        display: none;
+    }
+}

@@ -1,0 +1,27 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(python -m pytest -q)",
+      "Bash(python -c ' *)",
+      "Bash(node --check /tmp/clients_check.js)",
+      "Bash(node --check _check.js)",
+      "Bash(python _smoke.py)",
+      "Bash(node -e ' *)",
+      "Bash(npm -v)",
+      "Bash(timeout 60 npm ping)",
+      "Bash(npm install *)",
+      "Bash(curl *)",
+      "Bash(rm -f /tmp/cj.txt)",
+      "Read(//tmp/**)",
+      "Bash(venv/Scripts/python.exe -c ' *)",
+      "Bash(netstat -ano -p TCP)",
+      "PowerShell(Get-CimInstance *)",
+      "Bash(curl -s http://127.0.0.1:5000/api/clients)",
+      "Bash(rm -f api_probe.json)",
+      "Bash(venv/Scripts/python.exe -m pytest -q)",
+      "Bash(mkdir -p /tmp/shots)",
+      "Bash(echo \"--- node_modules exists: $?\")",
+      "Bash(python -c \"import playwright; print\\('py playwright ok'\\)\")"
+    ]
+  }
+}

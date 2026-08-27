@@ -1,0 +1,17 @@
+{
+    "name": "no-show-recovery-agent",
+    "version": "1.0.0",
+    "private": true,
+    "description": "Operational tooling for the Python no-show recovery agent",
+    "scripts": {
+        "test": "python -m pytest",
+        "compile": "python -m compileall -q .",
+        "validate": "python validate_csv.py",
+        "inspect": "python inspect_project.py",
+        "repo:check": "python repository_check.py",
+        "check": "npm run inspect && npm test && npm run compile && npm run validate && npm run repo:check"
+    },
+    "engines": {
+        "node": ">=18"
+    }
+}

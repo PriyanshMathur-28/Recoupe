@@ -1,0 +1,89 @@
+.stack {
+    position: fixed;
+    z-index: 50;
+    right: 22px;
+    bottom: 22px;
+    display: grid;
+    width: min(380px, calc(100vw - 36px));
+    gap: 10px;
+}
+
+.toast {
+    display: grid;
+    grid-template-columns: auto 1fr auto;
+    gap: 11px;
+    align-items: start;
+    padding: 13px 14px;
+    border: 1px solid var(--line);
+    border-left: 3px solid var(--tone, var(--brand));
+    border-radius: var(--r-md);
+    background: var(--surface);
+    box-shadow: var(--sh-3);
+}
+
+.success {
+    --tone: var(--ok);
+}
+
+.error {
+    --tone: var(--danger);
+}
+
+.info {
+    --tone: var(--brand);
+}
+
+.icon {
+    display: grid;
+    width: 25px;
+    height: 25px;
+    place-items: center;
+    border-radius: 50%;
+    color: var(--tone);
+    background: color-mix(in srgb, var(--tone) 13%, transparent);
+}
+
+.text {
+    min-width: 0;
+}
+
+.title,
+.detail {
+    overflow-wrap: anywhere;
+}
+
+.title {
+    color: var(--ink);
+    font-size: 13px;
+    font-weight: 750;
+}
+
+.detail {
+    margin-top: 3px;
+    color: var(--ink-2);
+    font-size: 12px;
+    line-height: 1.4;
+}
+
+.close {
+    display: grid;
+    width: 25px;
+    height: 25px;
+    place-items: center;
+    border: 0;
+    border-radius: var(--r-xs);
+    background: transparent;
+    color: var(--ink-3);
+}
+
+.close:hover {
+    background: var(--surface-3);
+    color: var(--ink);
+}
+
+@media (max-width: 520px) {
+    .stack {
+        right: 18px;
+        bottom: 18px;
+    }
+}

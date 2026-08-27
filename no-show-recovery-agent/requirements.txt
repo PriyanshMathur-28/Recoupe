@@ -1,0 +1,10 @@
+Flask
+APScheduler
+google-api-python-client
+google-auth
+google-auth-oauthlib
+razorpay
+python-dotenv
+requests
+pandas
+pytest

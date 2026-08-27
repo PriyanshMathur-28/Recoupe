@@ -1,0 +1,42 @@
+.badge {
+    display: inline-flex;
+    align-items: center;
+    gap: 6px;
+    padding: 5px 10px 5px 8px;
+    border-radius: 999px;
+    background: var(--badge-bg);
+    color: var(--badge-fg);
+    font-weight: 650;
+    letter-spacing: -0.01em;
+    white-space: nowrap;
+    border: 1px solid color-mix(in srgb, var(--badge-fg) 22%, transparent);
+}
+
+.dot {
+    width: 6px;
+    height: 6px;
+    border-radius: 50%;
+    background: currentColor;
+    box-shadow: 0 0 0 3px color-mix(in srgb, var(--badge-fg) 18%, transparent);
+    flex: none;
+}
+
+.sm {
+    font-size: 11px;
+    padding: 3px 8px 3px 7px;
+}
+
+.sm .dot {
+    width: 5px;
+    height: 5px;
+    box-shadow: 0 0 0 2px color-mix(in srgb, var(--badge-fg) 18%, transparent);
+}
+
+.md {
+    font-size: 12px;
+}
+
+.lg {
+    font-size: 13px;
+    padding: 7px 13px 7px 10px;
+}

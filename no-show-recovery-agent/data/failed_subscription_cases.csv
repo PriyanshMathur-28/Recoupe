@@ -1,0 +1,26 @@
+client_id,client_name,client_email,subscription_amount,failure_reason,attempt_count,last_charge_date
+SUB001,Leena Krishnan,leena.priyanshmathur926@gmail.com,1000,card_declined,0,2026-08-20
+SUB002,Diya Patel,diya.patel@example.com,799,card_declined,1,2026-08-19
+SUB003,Rohan Mehta,rohan.mehta@example.com,999,card_declined,2,2026-08-18
+SUB004,Ananya Iyer,priyanshmathur926@gmail.com,1299,card_declined,3,2026-08-17
+SUB005,Vikram Singh,vikram.singh@example.com,599,card_declined,1,2026-08-16
+SUB006,Meera Nair,meera.nair@example.com,899,card_declined,2,2026-08-15
+SUB007,Kabir Khan,kabir.khan@example.com,1499,insufficient_funds,0,2026-08-20
+SUB008,Ishita Rao,priyanshmathur926@gmail.com,699,insufficient_funds,1,2026-08-19
+SUB009,Aditya Joshi,priyanshmathur926@gmail.com,199,insufficient_funds,2,2026-08-18
+SUB010,Sana Kapoor,sana.kapoor@example.com,1599,insufficient_funds,3,2026-08-17
+SUB011,Neel Verma,neel.verma@example.com,449,insufficient_funds,0,2026-08-16
+SUB012,Tara Desai,tara.desai@example.com,899,insufficient_funds,2,2026-08-15
+SUB013,Arjun Kulkarni,arjun.kulkarni@example.com,1199,card_expired,0,2026-08-20
+SUB014,Kiara Bansal,kiara.bansal@example.com,549,card_expired,1,2026-08-19
+SUB015,Manav Shah,manav.shah@example.com,999,card_expired,2,2026-08-18
+SUB016,Myra Thomas,myra.thomas@example.com,1399,card_expired,3,2026-08-17
+SUB017,Yash Malhotra,yash.malhotra@example.com,749,card_expired,1,2026-08-16
+SUB018,Avni Gupta,avni.gupta@example.com,1049,card_expired,2,2026-08-15
+SUB019,Samir Bose,samir.bose@example.com,849,card_declined,0,2026-08-14
+SUB020,Anika Sen,anika.sen@example.com,849,insufficient_funds,3,2026-08-13
+SUB021,Dev Arora,dev.arora@example.com,649,card_declined,0,2026-08-12
+SUB022,Nisha Menon,nisha.menon@example.com,949,insufficient_funds,1,2026-08-11
+SUB023,Rahul Sethi,rahul.sethi@example.com,1249,card_expired,2,2026-08-10
+SUB024,Priya Dutta,priya.dutta@example.com,1549,bank_declined,1,2026-08-09
+SUB025,Kunal Jain,kunal.jain@example.com,699,payment_method_failed,0,2026-08-08
