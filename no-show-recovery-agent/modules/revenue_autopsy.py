@@ -107,11 +107,15 @@ def _resolved(record: dict[str, Any]) -> bool:
 
 
 def _canonical_csv_files(data_dir: Path) -> list[Path]:
-    """Avoid double counting subset exports when the combined source exists."""
+    """Return the single merged recovery source, and only that source.
+
+    The dashboard runs exclusively on the one combined CSV the operator uploads
+    (``recovery_cases.csv``), where each row is tagged by ``case_type``. Split
+    exports such as ``no_show_cases.csv`` or ``failed_subscription_cases.csv``
+    are intentionally never read — there is one file, one source of truth.
+    """
     combined = data_dir / "recovery_cases.csv"
-    if combined.exists():
-        return [combined]
-    return sorted(path for path in data_dir.glob("*.csv") if path.name not in {"audit_log.csv"})
+    return [combined] if combined.exists() else []
 
 
 def load_csv_records(data_dir: Path = DATA_DIR) -> tuple[list[dict[str, Any]], list[str]]:

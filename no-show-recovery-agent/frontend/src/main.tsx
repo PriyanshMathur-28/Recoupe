@@ -1,29 +1,68 @@
 import { StrictMode, useCallback, useEffect, useMemo, useState } from "react";
 import { createRoot } from "react-dom/client";
-import { ApiError, fetchClients, sendBulkEmails, sendClientEmail } from "./api";
+import { ApiError, fetchClients, fetchDataStatus, sendBulkEmails, sendClientEmail } from "./api";
 import { CaseDrawer } from "./components/CaseDrawer";
+import { CsvUploadGate } from "./components/CsvUploadGate";
 import { RevenueAutopsyChat } from "./components/RevenueAutopsyChat";
 import { ConfirmDialog } from "./components/ConfirmDialog";
 import type { ConfirmRequest } from "./components/ConfirmDialog";
 import { Toasts } from "./components/Toasts";
+import { LandingPage } from "./components/LandingPage";
 import { CONDITION_META, CONDITIONS, conditionLabel } from "./types";
 import type { AuditEvent, Client, Condition, EmailStatusFilter, SortDirection, SortKey } from "./types";
 import { absoluteTime, caseAmount, formatInr, fullTime, initials } from "./format";
 import { useToasts } from "./hooks/useToasts";
 import "./styles/global.css";
 import "./styles/tailwind.css";
+// landing.css is intentionally NOT bundled here. It is served directly as a
+// standalone stylesheet (see the <link> in index.html and the /landing.css
+// route in dashboard.py) so edits to it take effect on refresh without a build.
+
+/**
+ * The compiled bundle is served by Flask at three URLs (/, /dashboard,
+ * /clients). The marketing landing page owns the site root, while the recovery
+ * console lives at /dashboard and its /clients alias. A single bundle switching
+ * on pathname keeps the existing single-build deployment intact.
+ */
+const isDashboardPath = () => {
+    const path = window.location.pathname.replace(/\/+$/, "") || "/";
+    return path === "/dashboard" || path === "/clients";
+};
 
 const Icon = ({ children, className = "" }: { children: string; className?: string }) => <span className={`material-symbols-outlined ${className}`} aria-hidden="true">{children}</span>;
 const errorMessage = (error: unknown): string => error instanceof ApiError || error instanceof Error ? error.message : "An unexpected error occurred.";
 const selectable = (client: Client) => client.can_send && !client.email_sent;
 const resolved = (client: Client) => ["paid", "recovered", "resolved"].includes(client.payment_status.toLowerCase()) || ["paid", "recovered", "resolved"].includes(client.outcome.toLowerCase());
 const activeCase = (client: Client) => !resolved(client) && (!client.email_sent || client.condition === "escalate_human" || client.payment_status === "link_created");
-const navItems = [["dashboard", "Dashboard"], ["account_tree", "Recovery Workflows"], ["group", "Client Management"], ["insert_chart", "Analytics"], ["search_insights", "Revenue Autopsy AI"], ["settings", "Settings"]] as const;
+const navItems = [["account_tree", "Recovery Workflows"], ["insert_chart", "Analytics"], ["search_insights", "Revenue Autopsy AI"]] as const;
 type View = "active" | "history";
 type WorkspaceTab = "workflow" | "analytics" | "autopsy";
 type HistoryRow = AuditEvent & { client: Client; eventId: string };
 
 function App() {
+    const [dataReady, setDataReady] = useState<boolean | null>(null);
+    useEffect(() => {
+        let active = true;
+        void fetchDataStatus()
+            .then((status) => { if (active) setDataReady(status.ready); })
+            .catch(() => { if (active) setDataReady(false); });
+        return () => { active = false; };
+    }, []);
+
+    if (dataReady === null) {
+        return (
+            <div className="flex h-full min-h-0 items-center justify-center bg-background text-text-muted">
+                <span className="material-symbols-outlined animate-spin text-[28px]" aria-hidden="true">progress_activity</span>
+            </div>
+        );
+    }
+    if (!dataReady) {
+        return <CsvUploadGate onReady={() => setDataReady(true)} />;
+    }
+    return <Dashboard />;
+}
+
+function Dashboard() {
     const [clients, setClients] = useState<Client[]>([]);
     const [loading, setLoading] = useState(true);
     const [search, setSearch] = useState("");
@@ -85,4 +124,4 @@ function HistoryTable({ rows, onOpen, clearFilters }: { rows: HistoryRow[]; onOp
 
 const root = document.getElementById("root");
 if (!root) throw new Error("Missing #root application mount point");
-createRoot(root).render(<StrictMode><App /></StrictMode>);
+createRoot(root).render(<StrictMode>{isDashboardPath() ? <App /> : <LandingPage />}</StrictMode>);

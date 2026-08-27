@@ -2,19 +2,24 @@
 from __future__ import annotations
 
 import csv
+import io
 import json
 import math
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
 from flask import Flask, jsonify, redirect, render_template, render_template_string, request, send_file, session, url_for
 
+from batch_runner import run_batch
 from modules.audit_log import AUDIT_PATH
 from modules.attempt_tracker import DB_PATH as ATTEMPTS_DB_PATH
+from modules.detector import RECOVERY_CASES_PATH
 from modules.razorpay_webhooks import ingest_webhook
 from modules.revenue_autopsy import analyze as analyze_revenue, build_context as build_revenue_context
 from modules.service_layer import RecoveryService
 from modules.waitlist import DB_PATH as WAITLIST_DB_PATH
+from validate_csv import validate_file
 
 ROOT = Path(__file__).resolve().parent
 app = Flask(__name__, template_folder=str(ROOT / "templates"))
@@ -284,13 +289,18 @@ def reltime_filter(value: Any) -> str:
 
 @app.get("/login")
 def login():
-    return render_template_string("""<!doctype html><title>Dashboard login</title><form method='post'><label>User <input name='username'></label><label>Password <input name='password' type='password'></label><button>Sign in</button></form>""")
+    # The sign-in form is the hover/popup modal rendered on the landing page.
+    # There is no standalone login page any more, so a direct GET simply lands
+    # the visitor on the marketing page where they can open the modal.
+    return redirect(url_for("home"))
 
 
 @app.post("/login")
 def login_submit():
     if not DASHBOARD_PASSWORD or request.form.get("username") != DASHBOARD_USER or request.form.get("password") != DASHBOARD_PASSWORD:
-        return render_template_string("""<!doctype html><title>Dashboard login</title><p>Invalid dashboard credentials</p><form method='post'><input name='username'><input name='password' type='password'><button>Sign in</button></form>"""), 401
+        # Bounce failures back to the landing page; the modal re-opens and shows
+        # the inline error via the ?login=failed flag.
+        return redirect(url_for("home", login="failed")), 401
     session["dashboard_user"] = DASHBOARD_USER
     session["csrf_token"] = __import__("secrets").token_urlsafe(32)
     return redirect(url_for("dashboard"))
@@ -299,7 +309,7 @@ def login_submit():
 @app.get("/logout")
 def logout():
     session.clear()
-    return redirect(url_for("login"))
+    return redirect(url_for("home"))
 
 
 def _require_mutation_access():
@@ -307,7 +317,7 @@ def _require_mutation_access():
     if not DASHBOARD_PASSWORD:
         return jsonify({"error": "Dashboard mutations are disabled until DASHBOARD_PASSWORD is configured"}), 503
     if session.get("dashboard_user") != DASHBOARD_USER:
-        return redirect(url_for("login"))
+        return redirect(url_for("home"))
     if not session.get("csrf_token") or request.form.get("csrf_token") != session.get("csrf_token"):
         return jsonify({"error": "Invalid CSRF token"}), 403
     return None
@@ -398,6 +408,83 @@ def clients_api():
     return jsonify(_service().list_clients())
 
 
+def _recovery_row_count() -> int:
+    """Count data rows (excluding the header) in the active recovery CSV."""
+    if not RECOVERY_CASES_PATH.exists():
+        return 0
+    with RECOVERY_CASES_PATH.open(newline="", encoding="utf-8") as handle:
+        return max(sum(1 for _ in csv.reader(handle)) - 1, 0)
+
+
+@app.get("/api/data-status")
+def data_status_api():
+    """Report whether a recovery CSV has been ingested for this session.
+
+    The dashboard requires the operator to upload their own case data before any
+    metrics are shown; nothing is served from a pre-seeded database.
+    """
+    uploaded_at = session.get("data_uploaded_at")
+    return jsonify({
+        "ready": bool(uploaded_at),
+        "row_count": _recovery_row_count() if uploaded_at else 0,
+        "uploaded_at": uploaded_at,
+    })
+
+
+@app.post("/api/upload-csv")
+def upload_csv_api():
+    """Validate an uploaded recovery CSV and make it the dashboard's only data.
+
+    The file must match the documented recovery-case schema. On success it
+    replaces the active data source and the audit log is rebuilt from it, so the
+    dashboard reflects exactly the operator's uploaded rows and nothing else.
+    """
+    if DASHBOARD_PASSWORD and not session.get("dashboard_user"):
+        return jsonify({"error": "Sign in before uploading recovery data."}), 401
+
+    upload = request.files.get("file")
+    if upload is None or not (upload.filename or "").strip():
+        return jsonify({"error": "Choose a CSV file to upload."}), 400
+    if not upload.filename.lower().endswith(".csv"):
+        return jsonify({"error": "The file must be a .csv export."}), 400
+
+    raw = upload.read()
+    try:
+        text = raw.decode("utf-8-sig")
+    except UnicodeDecodeError:
+        return jsonify({"error": "The file must be UTF-8 encoded text."}), 400
+
+    # Validate a temporary copy before touching the live data source.
+    staging = RECOVERY_CASES_PATH.with_suffix(".upload.tmp")
+    staging.parent.mkdir(parents=True, exist_ok=True)
+    staging.write_text(text, encoding="utf-8", newline="")
+    try:
+        errors = validate_file(staging)
+    finally:
+        pass
+    if errors:
+        staging.unlink(missing_ok=True)
+        return jsonify({
+            "error": f"The CSV has {len(errors)} validation issue{'s' if len(errors) != 1 else ''}. Fix the rows below and re-upload.",
+            "details": errors[:50],
+        }), 400
+
+    # Promote the validated file, then rebuild the audit log from scratch so the
+    # dashboard shows only rows derived from this upload.
+    staging.replace(RECOVERY_CASES_PATH)
+    try:
+        run_batch(reset_audit=True, reset_attempts=True, live=False)
+    except Exception as exc:  # noqa: BLE001 - surface any processing failure to the operator
+        return jsonify({"error": f"The data was uploaded but could not be processed: {exc}"}), 500
+
+    session["data_uploaded_at"] = datetime.now(timezone.utc).isoformat()
+    return jsonify({
+        "ready": True,
+        "row_count": _recovery_row_count(),
+        "uploaded_at": session["data_uploaded_at"],
+    })
+
+
 @app.get("/api/revenue-autopsy/context")
 def revenue_autopsy_context_api():
     """Return a compact description of the data currently grounding the analyst."""
@@ -484,18 +571,27 @@ def ensure_port_available(host: str, port: int) -> None:
     )
 
 
-def _serve_client_console():
-    """Serve the compiled React console used by the dashboard entry points."""
-    if DASHBOARD_PASSWORD and not session.get("dashboard_user"):
-        return redirect(url_for("login"))
+def _serve_bundle():
+    """Send the compiled React shell with a no-store header.
+
+    The bundle is a single build that renders either the marketing landing page
+    or the recovery console depending on the request path (see main.tsx). The
+    shell names hashed asset files, so only the shell itself must stay uncached:
+    a cached copy keeps loading a previous build's bundle forever.
+    """
     bundle_index = ROOT / "static" / "clients" / "index.html"
     if not bundle_index.exists():
         return jsonify({"error": "Client console is not built. Run npm run build in frontend."}), 503
     response = send_file(bundle_index)
-    # The shell names hashed asset files, so only the shell itself must stay
-    # uncached: a cached copy keeps loading a previous build's bundle forever.
     response.headers["Cache-Control"] = "no-store, must-revalidate"
     return response
+
+
+def _serve_client_console():
+    """Serve the compiled React console used by the dashboard entry points."""
+    if DASHBOARD_PASSWORD and not session.get("dashboard_user"):
+        return redirect(url_for("home"))
+    return _serve_bundle()
 
 
 @app.get("/clients")
@@ -504,10 +600,32 @@ def clients_page():
     return _serve_client_console()
 
 
+@app.get("/landing.css")
+def landing_css():
+    """Serve the landing stylesheet straight from source, uncached.
+
+    The landing styles are deliberately kept out of the compiled JS bundle so
+    that edits to frontend/src/styles/landing.css take effect on a simple
+    refresh, with no npm build step. The no-store header prevents the browser
+    from pinning a stale copy.
+    """
+    stylesheet = ROOT / "frontend" / "src" / "styles" / "landing.css"
+    if not stylesheet.exists():
+        return jsonify({"error": "landing.css not found"}), 404
+    response = send_file(stylesheet, mimetype="text/css")
+    response.headers["Cache-Control"] = "no-store, must-revalidate"
+    return response
+
+
 @app.get("/")
 def home():
-    """Send the default browser URL to the recovery dashboard."""
-    return redirect(url_for("dashboard"))
+    """Serve the public marketing landing page at the site root.
+
+    The landing page needs no authentication; the same bundle renders the
+    console only on the /dashboard and /clients paths, both of which enforce
+    the login gate through _serve_client_console().
+    """
+    return _serve_bundle()
 
 
 @app.get("/dashboard")

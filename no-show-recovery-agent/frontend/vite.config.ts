@@ -18,6 +18,14 @@ export default defineConfig({
                 target: "http://127.0.0.1:5000",
                 changeOrigin: true,
             },
+            // landing.css is served by Flask straight from source (see the
+            // /landing.css route in dashboard.py) instead of being bundled, so
+            // the dev server must proxy it too or the landing page renders
+            // unstyled on :5173.
+            "/landing.css": {
+                target: "http://127.0.0.1:5000",
+                changeOrigin: true,
+            },
         },
     },
 });
