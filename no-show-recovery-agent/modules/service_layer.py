@@ -24,6 +24,20 @@ def case_key(event: dict[str, Any], action: str) -> str:
     return hashlib.sha256(payload.encode("utf-8")).hexdigest()
 
 
+def draft_invoice_number(key: str, timestamp: str) -> str:
+    """Return a stable provisional invoice number for a case with no issued invoice.
+
+    A real number is only minted at send time by `build_invoice`, which hashes the
+    Razorpay payment link and stamps the current date, so it cannot be reproduced
+    for an unsent case. This derives a placeholder from the case identity and the
+    case's own newest audit timestamp instead, so the dashboard always has a
+    stable reference to show and the same case never changes number between reads.
+    """
+    digest = hashlib.sha256(f"draft:{key}".encode("utf-8")).hexdigest()[:8].upper()
+    day = "".join(character for character in str(timestamp)[:10] if character.isdigit()) or "00000000"
+    return f"INV-{day}-{digest}"
+
+
 class RecoveryService:
     """Coordinate operational state without coupling callers to storage details."""
 
@@ -84,6 +98,16 @@ class RecoveryService:
             _, row, event = entries[-1]
             condition = str(row.get("action") or "escalate_human")
             key = case_key(event, condition)
+            last_activity_at = str(row.get("timestamp") or "") or None
+            issued_invoice_number = next(
+                (
+                    str(audit_event.get("invoice_number")).strip()
+                    for _, _, audit_event in reversed(entries)
+                    if str(audit_event.get("invoice_number") or "").strip()
+                ),
+                None,
+            )
+            invoice_number = issued_invoice_number or draft_invoice_number(key, last_activity_at or "")
             status = statuses.get(client_id)
             sent = bool(status and status.get("current_condition") == condition and status.get("current_case_key") == key)
             audit_trail = [
@@ -105,12 +129,13 @@ class RecoveryService:
                 "condition": condition,
                 "email_sent": sent,
                 "last_email_sent_at": status.get("last_email_sent_at") if sent and status else None,
+                "last_activity_at": last_activity_at,
                 "can_send": condition in MESSAGE_ACTIONS and "@" in str(event.get("client_email") or ""),
                 "case_key": key,
                 "case": event,
                 "payment_status": row.get("payment_status") or "not_applicable",
                 "outcome": row.get("outcome") or "",
-                "invoice_number": event.get("invoice_number"),
+                "invoice_number": invoice_number,
                 "invoice_status": event.get("invoice_status"),
                 "invoice_due_date": event.get("invoice_due_date"),
                 "invoice_amount": event.get("invoice_amount"),

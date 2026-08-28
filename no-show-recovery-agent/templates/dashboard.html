@@ -270,9 +270,9 @@
         }
 
         .page {
-            width: min(1440px, calc(100% - 64px));
-            margin: auto;
-            padding: 36px 0 56px;
+            width: 100%;
+            margin: 0;
+            padding: 36px 32px 56px;
         }
 
         .page-head {
@@ -1013,8 +1013,8 @@
             }
 
             .page {
-                width: calc(100% - 40px);
-                padding-top: 28px;
+                width: 100%;
+                padding: 28px 20px 48px;
             }
         }
 
@@ -1024,7 +1024,9 @@
             }
 
             .page {
-                width: calc(100% - 24px);
+                width: 100%;
+                padding-left: 12px;
+                padding-right: 12px;
             }
 
             .page-head {
@@ -1218,242 +1220,251 @@
                             <span class="card-action">{{ metrics.escalations }} open</span>
                         </div>
                         <div class="review-list">{% for flag in review_flags[:3] %}<div class="review-item"><span
-                                class="review-indicator"></span>
-                            <div class="review-content"><span class="review-name">{{ flag.client_id }}</span><span
-                                    class="review-reason">{{ flag.reason }}</span></div><span class="review-arrow">›</span>
-                        </div>{% else %}<div class="review-item"><span class="review-indicator clear"></span>
-                            <div class="review-content"><span class="review-name">No cases waiting for review</span><span
-                                    class="review-reason">Everything is up to date.</span></div>
-                        </div>{% endfor %}</div>
-                        {% if review_flags %}<div class="card-body"><strong>Open owner flags</strong>{% for flag in review_flags %}<div
-                                class="review-item">
+                                    class="review-indicator"></span>
+                                <div class="review-content"><span class="review-name">{{ flag.client_id }}</span><span
+                                        class="review-reason">{{ flag.reason }}</span></div><span
+                                    class="review-arrow">›</span>
+                            </div>{% else %}<div class="review-item"><span class="review-indicator clear"></span>
+                                <div class="review-content"><span class="review-name">No cases waiting for
+                                        review</span><span class="review-reason">Everything is up to date.</span></div>
+                            </div>{% endfor %}</div>
+                        {% if review_flags %}<div class="card-body"><strong>Open owner flags</strong>{% for flag in
+                            review_flags %}<div class="review-item">
                                 <div class="review-content"><span class="review-name">{{ flag.client_id }}</span><span
                                         class="review-reason">{{ flag.reason }}</span></div>
-                                <form method="post" action="/dashboard/review/{{ flag.id }}/resolve"><input type="hidden"
-                                        name="csrf_token" value="{{ csrf_token }}"><button type="submit">Acknowledge</button></form>
+                                <form method="post" action="/dashboard/review/{{ flag.id }}/resolve"><input
+                                        type="hidden" name="csrf_token" value="{{ csrf_token }}"><button
+                                        type="submit">Acknowledge</button></form>
                             </div>{% endfor %}</div>{% endif %}
-        </article>
-        </section>
+                    </article>
+                </section>
 
-        <section class="card" id="waitlist" aria-label="Waitlist controls">
-            <div class="card-head">
-                <div>
-                    <h2 class="card-title">Waitlist controls</h2>
-                    <p class="card-description">Manage recipients and slot state</p>
-                </div>
-            </div>
-            <div class="card-body">
-                <p>Next in line: {{ next_waitlist.client_name if next_waitlist else 'No waiting client' }}</p>
-                {% for person in waitlist %}
-                <form method="post" action="/dashboard/waitlist/{{ person.id }}" class="review-item"><input type="hidden"
-                    name="csrf_token" value="{{ csrf_token }}">
-                    <input name="client_id" value="{{ person.client_id }}" required><input name="client_name"
-                        value="{{ person.client_name }}" required><input name="client_email" type="email"
-                        value="{{ person.client_email }}" required><input type="hidden" name="status"
-                        value="{{ person.status }}"><button type="submit">Save row</button>
-                </form>
-                {% endfor %}
-                <form method="post" action="/dashboard/waitlist"><input type="hidden" name="csrf_token"
-                    value="{{ csrf_token }}"><input name="client_id" placeholder="Client ID"
-                        required><input name="client_name" placeholder="Name" required><input name="client_email"
-                        type="email" placeholder="Email" required><button type="submit">Add client</button></form>
-                <form method="post" action="/dashboard/waitlist/slot"><input type="hidden" name="csrf_token"
-                    value="{{ csrf_token }}"><select name="status">
-                        <option value="open">Open</option>
-                        <option value="filled">Filled</option>
-                    </select><button type="submit">Update slot</button></form>
-            </div>
-        </section>
-
-        <section class="grid">
-            <article class="card">
-                <div class="card-head">
-                    <div>
-                        <h2 class="card-title">Case mix</h2>
-                        <p class="card-description">Distribution across recovery channels</p>
-                    </div>
-                </div>
-                <div class="donut-wrap">
-                    <div class="donut">
-                        <svg viewBox="0 0 100 100" aria-hidden="true">
-                            <circle cx="50" cy="50" r="42" fill="none" stroke="#eef1f6" stroke-width="12"></circle>
-                            {% for segment in metrics.mix.segments %}
-                            <circle cx="50" cy="50" r="42" fill="none" stroke="{{ segment.color }}" stroke-width="12"
-                                stroke-linecap="butt"
-                                stroke-dasharray="{{ segment.dash }} {{ metrics.mix.circumference }}"
-                                stroke-dashoffset="{{ segment.offset }}"></circle>
-                            {% endfor %}
-                        </svg>
-                        <div class="donut-center">
-                            <div class="donut-total">{{ metrics.mix.total }}</div>
-                            <div class="donut-label">total cases</div>
+                <section class="card" id="waitlist" aria-label="Waitlist controls">
+                    <div class="card-head">
+                        <div>
+                            <h2 class="card-title">Waitlist controls</h2>
+                            <p class="card-description">Manage recipients and slot state</p>
                         </div>
                     </div>
-                    <div class="mix-legend">
-                        {% for segment in metrics.mix.segments %}
-                        <div class="mix-row">
-                            <span class="mix-dot" style="background:{{ segment.color }}"></span>
-                            <span class="mix-name">{{ segment.label }}</span>
-                            <span class="mix-count">{{ segment.count }}</span>
-                            <span class="mix-pct">{{ segment.frac }}%</span>
-                        </div>
+                    <div class="card-body">
+                        <p>Next in line: {{ next_waitlist.client_name if next_waitlist else 'No waiting client' }}</p>
+                        {% for person in waitlist %}
+                        <form method="post" action="/dashboard/waitlist/{{ person.id }}" class="review-item"><input
+                                type="hidden" name="csrf_token" value="{{ csrf_token }}">
+                            <input name="client_id" value="{{ person.client_id }}" required><input name="client_name"
+                                value="{{ person.client_name }}" required><input name="client_email" type="email"
+                                value="{{ person.client_email }}" required><input type="hidden" name="status"
+                                value="{{ person.status }}"><button type="submit">Save row</button>
+                        </form>
                         {% endfor %}
+                        <form method="post" action="/dashboard/waitlist"><input type="hidden" name="csrf_token"
+                                value="{{ csrf_token }}"><input name="client_id" placeholder="Client ID" required><input
+                                name="client_name" placeholder="Name" required><input name="client_email" type="email"
+                                placeholder="Email" required><button type="submit">Add client</button></form>
+                        <form method="post" action="/dashboard/waitlist/slot"><input type="hidden" name="csrf_token"
+                                value="{{ csrf_token }}"><select name="status">
+                                <option value="open">Open</option>
+                                <option value="filled">Filled</option>
+                            </select><button type="submit">Update slot</button></form>
                     </div>
-                </div>
-            </article>
+                </section>
 
-            <article class="card">
-                <div class="card-head">
-                    <div>
-                        <h2 class="card-title">Recovery funnel</h2>
-                        <p class="card-description">Action outcomes by source</p>
-                    </div>
-                </div>
-                <div class="card-body">
-                    {% set total_actions = metrics.success_actions + metrics.escalations %}
-                    <div class="funnel">
-                        <div class="funnel-row">
-                            <span class="funnel-label">Fees sent</span>
-                            <div class="funnel-track">
-                                <div class="funnel-fill brand"
-                                    style="width: {{ (metrics.fees_sent / (total_actions or 1) * 100)|round(0) }}%">{{
-                                    metrics.fees_sent }}</div>
+                <section class="grid">
+                    <article class="card">
+                        <div class="card-head">
+                            <div>
+                                <h2 class="card-title">Case mix</h2>
+                                <p class="card-description">Distribution across recovery channels</p>
                             </div>
-                            <span class="funnel-value">{{ metrics.fees_paid }} paid</span>
                         </div>
-                        <div class="funnel-row">
-                            <span class="funnel-label">Retries run</span>
-                            <div class="funnel-track">
-                                <div class="funnel-fill green"
-                                    style="width: {{ (metrics.subscriptions_retried / (total_actions or 1) * 100)|round(0) }}%">
-                                    {{ metrics.subscriptions_retried }}</div>
+                        <div class="donut-wrap">
+                            <div class="donut">
+                                <svg viewBox="0 0 100 100" aria-hidden="true">
+                                    <circle cx="50" cy="50" r="42" fill="none" stroke="#eef1f6" stroke-width="12">
+                                    </circle>
+                                    {% for segment in metrics.mix.segments %}
+                                    <circle cx="50" cy="50" r="42" fill="none" stroke="{{ segment.color }}"
+                                        stroke-width="12" stroke-linecap="butt"
+                                        stroke-dasharray="{{ segment.dash }} {{ metrics.mix.circumference }}"
+                                        stroke-dashoffset="{{ segment.offset }}"></circle>
+                                    {% endfor %}
+                                </svg>
+                                <div class="donut-center">
+                                    <div class="donut-total">{{ metrics.mix.total }}</div>
+                                    <div class="donut-label">total cases</div>
+                                </div>
                             </div>
-                            <span class="funnel-value">{{ metrics.subscriptions_recovered }} saved</span>
-                        </div>
-                        <div class="funnel-row">
-                            <span class="funnel-label">Waitlist</span>
-                            <div class="funnel-track">
-                                <div class="funnel-fill amber"
-                                    style="width: {{ (metrics.slots_refilled / (total_actions or 1) * 100)|round(0) }}%">
-                                    {{ metrics.slots_refilled }}</div>
+                            <div class="mix-legend">
+                                {% for segment in metrics.mix.segments %}
+                                <div class="mix-row">
+                                    <span class="mix-dot" style="background:{{ segment.color }}"></span>
+                                    <span class="mix-name">{{ segment.label }}</span>
+                                    <span class="mix-count">{{ segment.count }}</span>
+                                    <span class="mix-pct">{{ segment.frac }}%</span>
+                                </div>
+                                {% endfor %}
                             </div>
-                            <span class="funnel-value">{{ metrics.slots_refilled }} refills</span>
                         </div>
-                        <div class="funnel-row">
-                            <span class="funnel-label">Escalated</span>
-                            <div class="funnel-track">
-                                <div class="funnel-fill red"
-                                    style="width: {{ (metrics.escalations / (total_actions or 1) * 100)|round(0) }}%">{{
-                                    metrics.escalations }}</div>
-                            </div>
-                            <span class="funnel-value">needs owner</span>
-                        </div>
-                    </div>
-                </div>
-            </article>
-        </section>
+                    </article>
 
-        <section class="grid">
-            <article class="card">
-                <div class="card-head">
-                    <div>
-                        <h2 class="card-title">Failure reasons</h2>
-                        <p class="card-description">Why memberships fail, by volume</p>
-                    </div>
-                </div>
-                <div class="card-body">
-                    {% set max_reason = metrics.reason_breakdown[0].count if metrics.reason_breakdown else 1 %}
-                    {% if metrics.reason_breakdown %}
-                    <div class="reason-list">
-                        {% for reason in metrics.reason_breakdown[:5] %}
-                        <div class="reason-row">
-                            <span class="reason-label">{{ reason.label }}</span>
-                            <div class="reason-track">
-                                <div class="reason-fill"
-                                    style="width: {{ (reason.count / max_reason * 100)|round(0) }}%"></div>
+                    <article class="card">
+                        <div class="card-head">
+                            <div>
+                                <h2 class="card-title">Recovery funnel</h2>
+                                <p class="card-description">Action outcomes by source</p>
                             </div>
-                            <span class="reason-count">{{ reason.count }}</span>
                         </div>
-                        {% endfor %}
-                    </div>
-                    {% else %}
-                    <div class="empty">No failed membership cases recorded.</div>
-                    {% endif %}
-                </div>
-            </article>
-
-            <article class="card">
-                <div class="card-head">
-                    <div>
-                        <h2 class="card-title">Health status</h2>
-                        <p class="card-description">Data quality across the audit log</p>
-                    </div>
-                    <span class="card-action">{{ metrics.clean_rate }}% clean</span>
-                </div>
-                <div class="card-body">
-                    <div class="breakdown">
-                        <div class="breakdown-item"><span class="breakdown-name">Clean records</span>
-                            <div class="track">
-                                <div class="fill" style="width: {{ metrics.clean_rate }}%"></div>
-                            </div><span class="breakdown-number">{{ metrics.healthy }}</span>
+                        <div class="card-body">
+                            {% set total_actions = metrics.success_actions + metrics.escalations %}
+                            <div class="funnel">
+                                <div class="funnel-row">
+                                    <span class="funnel-label">Fees sent</span>
+                                    <div class="funnel-track">
+                                        <div class="funnel-fill brand"
+                                            style="width: {{ (metrics.fees_sent / (total_actions or 1) * 100)|round(0) }}%">
+                                            {{
+                                            metrics.fees_sent }}</div>
+                                    </div>
+                                    <span class="funnel-value">{{ metrics.fees_paid }} paid</span>
+                                </div>
+                                <div class="funnel-row">
+                                    <span class="funnel-label">Retries run</span>
+                                    <div class="funnel-track">
+                                        <div class="funnel-fill green"
+                                            style="width: {{ (metrics.subscriptions_retried / (total_actions or 1) * 100)|round(0) }}%">
+                                            {{ metrics.subscriptions_retried }}</div>
+                                    </div>
+                                    <span class="funnel-value">{{ metrics.subscriptions_recovered }} saved</span>
+                                </div>
+                                <div class="funnel-row">
+                                    <span class="funnel-label">Waitlist</span>
+                                    <div class="funnel-track">
+                                        <div class="funnel-fill amber"
+                                            style="width: {{ (metrics.slots_refilled / (total_actions or 1) * 100)|round(0) }}%">
+                                            {{ metrics.slots_refilled }}</div>
+                                    </div>
+                                    <span class="funnel-value">{{ metrics.slots_refilled }} refills</span>
+                                </div>
+                                <div class="funnel-row">
+                                    <span class="funnel-label">Escalated</span>
+                                    <div class="funnel-track">
+                                        <div class="funnel-fill red"
+                                            style="width: {{ (metrics.escalations / (total_actions or 1) * 100)|round(0) }}%">
+                                            {{
+                                            metrics.escalations }}</div>
+                                    </div>
+                                    <span class="funnel-value">needs owner</span>
+                                </div>
+                            </div>
                         </div>
-                        <div class="breakdown-item"><span class="breakdown-name">Flagged errors</span>
-                            <div class="track">
-                                <div class="fill amber" style="width: {{ 100 - metrics.clean_rate }}%"></div>
-                            </div><span class="breakdown-number">{{ metrics.flagged }}</span>
+                    </article>
+                </section>
+
+                <section class="grid">
+                    <article class="card">
+                        <div class="card-head">
+                            <div>
+                                <h2 class="card-title">Failure reasons</h2>
+                                <p class="card-description">Why memberships fail, by volume</p>
+                            </div>
                         </div>
+                        <div class="card-body">
+                            {% set max_reason = metrics.reason_breakdown[0].count if metrics.reason_breakdown else 1 %}
+                            {% if metrics.reason_breakdown %}
+                            <div class="reason-list">
+                                {% for reason in metrics.reason_breakdown[:5] %}
+                                <div class="reason-row">
+                                    <span class="reason-label">{{ reason.label }}</span>
+                                    <div class="reason-track">
+                                        <div class="reason-fill"
+                                            style="width: {{ (reason.count / max_reason * 100)|round(0) }}%"></div>
+                                    </div>
+                                    <span class="reason-count">{{ reason.count }}</span>
+                                </div>
+                                {% endfor %}
+                            </div>
+                            {% else %}
+                            <div class="empty">No failed membership cases recorded.</div>
+                            {% endif %}
+                        </div>
+                    </article>
+
+                    <article class="card">
+                        <div class="card-head">
+                            <div>
+                                <h2 class="card-title">Health status</h2>
+                                <p class="card-description">Data quality across the audit log</p>
+                            </div>
+                            <span class="card-action">{{ metrics.clean_rate }}% clean</span>
+                        </div>
+                        <div class="card-body">
+                            <div class="breakdown">
+                                <div class="breakdown-item"><span class="breakdown-name">Clean records</span>
+                                    <div class="track">
+                                        <div class="fill" style="width: {{ metrics.clean_rate }}%"></div>
+                                    </div><span class="breakdown-number">{{ metrics.healthy }}</span>
+                                </div>
+                                <div class="breakdown-item"><span class="breakdown-name">Flagged errors</span>
+                                    <div class="track">
+                                        <div class="fill amber" style="width: {{ 100 - metrics.clean_rate }}%"></div>
+                                    </div><span class="breakdown-number">{{ metrics.flagged }}</span>
+                                </div>
+                            </div>
+                        </div>
+                    </article>
+                </section>
+
+
+                <section class="card activity" id="cases" aria-label="Case outcomes">
+                    <div class="card-head">
+                        <div>
+                            <h2 class="card-title">Case outcomes</h2>
+                            <p class="card-description">Actions recorded in the recovery audit log</p>
+                        </div>
+                        <span class="card-action">{{ cases|length }} records</span>
                     </div>
-                </div>
-            </article>
-        </section>
-
-
-        <section class="card activity" id="cases" aria-label="Case outcomes">
-            <div class="card-head">
-                <div>
-                    <h2 class="card-title">Case outcomes</h2>
-                    <p class="card-description">Actions recorded in the recovery audit log</p>
-                </div>
-                <span class="card-action">{{ cases|length }} records</span>
-            </div>
-            <div class="table-wrap">
-                <table>
-                    <thead>
-                        <tr>
-                            <th>Client</th>
-                            <th>Risk signal</th>
-                            <th>Action taken</th>
-                            <th>Payment state</th>
-                            <th>Result</th>
-                        </tr>
-                    </thead>
-                    <tbody>{% for case in cases|reverse %}<tr>
-                            <td><span class="client-name">{{ case.client_name or 'Unknown client' }}</span><span
-                                    class="client-id">{{ case.client_id }}</span></td>
-                            <td><span class="pill blue">{{ case.event_type|replace('_', ' ')|title }}</span></td>
-                            <td><span
-                                    class="pill {% if case.action == 'escalate_human' %}red{% else %}green{% endif %}">{{
-                                    case.action|replace('_', ' ')|title }}</span>
-                                {% if case.action == 'escalate_human' %}<form method="post"
-                                    action="/dashboard/cases/retry"><input type="hidden" name="csrf_token"
-                                        value="{{ csrf_token }}"><input type="hidden" name="event_json" value='{{ case.event_json }}'><button
-                                        type="submit">Request retry</button>
-                                </form>{% endif %}</td>
-                            <td><span class="pill gray">{{ case.payment_status|replace('_', ' ')|title }}</span></td>
-                            <td><span
-                                    class="pill {% if case.status == 'flagged_error' %}red{% else %}green{% endif %}">{{
-                                    case.status|replace('_', ' ')|title }}</span>{% if case.errors %}<span
-                                    class="error">{{ case.errors }}</span>{% endif %}</td>
-                        </tr>{% else %}<tr>
-                            <td colspan="5" class="empty">No activity recorded yet.</td>
-                        </tr>{% endfor %}</tbody>
-                </table>
-            </div>
-        </section>
-        <p class="footer">Operational view · Audit data is transactionally stored; owner and waitlist actions are
-            available above.</p>
-        </main>
-    </div>
+                    <div class="table-wrap">
+                        <table>
+                            <thead>
+                                <tr>
+                                    <th>Client</th>
+                                    <th>Risk signal</th>
+                                    <th>Action taken</th>
+                                    <th>Payment state</th>
+                                    <th>Result</th>
+                                </tr>
+                            </thead>
+                            <tbody>{% for case in cases|reverse %}<tr>
+                                    <td><span class="client-name">{{ case.client_name or 'Unknown client' }}</span><span
+                                            class="client-id">{{ case.client_id }}</span></td>
+                                    <td><span class="pill blue">{{ case.event_type|replace('_', ' ')|title }}</span>
+                                    </td>
+                                    <td><span
+                                            class="pill {% if case.action == 'escalate_human' %}red{% else %}green{% endif %}">{{
+                                            case.action|replace('_', ' ')|title }}</span>
+                                        {% if case.action == 'escalate_human' %}<form method="post"
+                                            action="/dashboard/cases/retry"><input type="hidden" name="csrf_token"
+                                                value="{{ csrf_token }}"><input type="hidden" name="event_json"
+                                                value='{{ case.event_json }}'><button type="submit">Request
+                                                retry</button>
+                                        </form>{% endif %}</td>
+                                    <td><span class="pill gray">{{ case.payment_status|replace('_', ' ')|title }}</span>
+                                    </td>
+                                    <td><span
+                                            class="pill {% if case.status == 'flagged_error' %}red{% else %}green{% endif %}">{{
+                                            case.status|replace('_', ' ')|title }}</span>{% if case.errors %}<span
+                                            class="error">{{ case.errors }}</span>{% endif %}</td>
+                                </tr>{% else %}<tr>
+                                    <td colspan="5" class="empty">No activity recorded yet.</td>
+                                </tr>{% endfor %}</tbody>
+                        </table>
+                    </div>
+                </section>
+                <p class="footer">Operational view · Audit data is transactionally stored; owner and waitlist actions
+                    are
+                    available above.</p>
+            </main>
+        </div>
     </div>
 </body>
 

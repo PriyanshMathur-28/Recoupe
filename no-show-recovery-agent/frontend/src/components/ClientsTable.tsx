@@ -30,9 +30,9 @@ interface Props {
 
 const COLUMNS: { key: SortKey | null; label: string; align?: "right" }[] = [
     { key: "name", label: "Client" },
-    { key: "condition", label: "Condition" },
-    { key: "email_sent", label: "Email Status" },
-    { key: "last_email_sent_at", label: "Last Email Sent" },
+    { key: "email_sent", label: "Email Sent" },
+    { key: "last_activity_at", label: "Last Activity" },
+    { key: "invoice_number", label: "Invoice #" },
     { key: null, label: "Action" },
 ];
 
@@ -169,24 +169,27 @@ export function ClientsTable({
                                     </td>
 
                                     <td>
-                                        <ConditionBadge condition={client.condition} />
+                                        <div>
+                                            {client.email_sent ? (
+                                                <span className={`${styles.status} ${styles.statusSent}`}>
+                                                    <MailCheckIcon size={13} />
+                                                    Sent
+                                                </span>
+                                            ) : (
+                                                <span className={styles.status}>Not sent</span>
+                                            )}
+                                            <ConditionBadge condition={client.condition} />
+                                        </div>
                                     </td>
 
                                     <td>
-                                        {client.email_sent ? (
-                                            <span className={`${styles.status} ${styles.statusSent}`}>
-                                                <MailCheckIcon size={13} />
-                                                Sent
-                                            </span>
-                                        ) : (
-                                            <span className={styles.status}>Not sent</span>
-                                        )}
-                                    </td>
-
-                                    <td>
-                                        <span className={`${styles.timestamp} tnum`} title={fullTime(client.last_email_sent_at)}>
-                                            {client.email_sent ? absoluteTime(client.last_email_sent_at) : "—"}
+                                        <span className={`${styles.timestamp} tnum`} title={fullTime(client.last_activity_at)}>
+                                            {absoluteTime(client.last_activity_at)}
                                         </span>
+                                    </td>
+
+                                    <td>
+                                        <span className={`${styles.timestamp} tnum`}>{client.invoice_number || "—"}</span>
                                     </td>
 
                                     <td className={styles.actionCol} data-interactive>

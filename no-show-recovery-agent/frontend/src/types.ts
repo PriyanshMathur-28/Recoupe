@@ -56,6 +56,8 @@ export interface Client {
     /** True only when a send is confirmed for the client's *current* case. */
     email_sent: boolean;
     last_email_sent_at: string | null;
+    /** Timestamp of the newest audit event for the current client case. */
+    last_activity_at: string | null;
     /** False when the condition has no client email action, or no valid address. */
     can_send: boolean;
     case_key: string;
@@ -116,7 +118,7 @@ export interface AutopsyResponse {
 }
 
 export type EmailStatusFilter = "all" | "sent" | "not-sent";
-export type SortKey = "name" | "condition" | "last_email_sent_at" | "email_sent";
+export type SortKey = "name" | "last_activity_at" | "email_sent" | "invoice_number";
 export type SortDirection = "asc" | "desc";
 
 export interface ConditionMeta {

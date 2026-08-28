@@ -28,9 +28,9 @@ export const isSelectable = (client: Client): boolean => client.can_send && !cli
 
 const COLUMNS: { key: SortKey | null; label: string; align?: "right" }[] = [
     { key: "name", label: "Client" },
-    { key: "condition", label: "Condition" },
-    { key: "email_sent", label: "Status" },
-    { key: "last_email_sent_at", label: "Last Activity" },
+    { key: "email_sent", label: "Email Sent" },
+    { key: "last_activity_at", label: "Last Activity" },
+    { key: "invoice_number", label: "Invoice #" },
     { key: null, label: "Action", align: "right" },
 ];
 
@@ -113,9 +113,8 @@ export function CasesTable({
                                         type="button"
                                         onClick={() => onSort(column.key as SortKey)}
                                         aria-label={`Sort by ${column.label}`}
-                                        className={`inline-flex items-center gap-1 uppercase tracking-wider transition-colors hover:text-text-primary ${
-                                            sort.key === column.key ? "text-text-primary" : ""
-                                        }`}
+                                        className={`inline-flex items-center gap-1 uppercase tracking-wider transition-colors hover:text-text-primary ${sort.key === column.key ? "text-text-primary" : ""
+                                            }`}
                                     >
                                         {column.label}
                                         <Icon
@@ -165,9 +164,8 @@ export function CasesTable({
                                     }}
                                     tabIndex={0}
                                     aria-label={`Open case detail for ${client.name || "unknown client"}`}
-                                    className={`hover:bg-surface-subtle/50 transition-colors group cursor-pointer ${
-                                        checked ? "bg-action-indigo/[0.04]" : ""
-                                    }`}
+                                    className={`hover:bg-surface-subtle/50 transition-colors group cursor-pointer ${checked ? "bg-action-indigo/[0.04]" : ""
+                                        }`}
                                 >
                                     <td className="px-stack-lg pr-0 py-4 w-10" data-interactive>
                                         <input
@@ -199,9 +197,8 @@ export function CasesTable({
                                                     {client.name || "Unknown client"}
                                                 </span>
                                                 <span
-                                                    className={`text-text-muted text-xs truncate ${
-                                                        client.email ? "" : "italic"
-                                                    }`}
+                                                    className={`text-text-muted text-xs truncate ${client.email ? "" : "italic"
+                                                        }`}
                                                 >
                                                     {client.email || "No email on file"}
                                                 </span>
@@ -210,40 +207,38 @@ export function CasesTable({
                                     </td>
 
                                     <td className="px-stack-lg py-4">
-                                        <ConditionBadge condition={client.condition} />
-                                    </td>
-
-                                    <td className="px-stack-lg py-4">
-                                        {client.email_sent ? (
-                                            <div className="flex items-center gap-1.5">
-                                                <span className="w-1.5 h-1.5 rounded-full bg-success" />
-                                                <span className="text-xs font-medium uppercase tracking-wider text-success">
-                                                    Sent
-                                                </span>
-                                            </div>
-                                        ) : (
-                                            <div className="flex items-center gap-1.5 text-text-muted">
-                                                <span className="w-1.5 h-1.5 rounded-full bg-outline" />
-                                                <span className="text-xs font-medium uppercase tracking-wider">
-                                                    Not sent
-                                                </span>
-                                            </div>
-                                        )}
+                                        <div className="flex flex-col items-start gap-1.5">
+                                            {client.email_sent ? (
+                                                <div className="flex items-center gap-1.5">
+                                                    <span className="w-1.5 h-1.5 rounded-full bg-success" />
+                                                    <span className="text-xs font-medium uppercase tracking-wider text-success">
+                                                        Sent
+                                                    </span>
+                                                </div>
+                                            ) : (
+                                                <div className="flex items-center gap-1.5 text-text-muted">
+                                                    <span className="w-1.5 h-1.5 rounded-full bg-outline" />
+                                                    <span className="text-xs font-medium uppercase tracking-wider">
+                                                        Not sent
+                                                    </span>
+                                                </div>
+                                            )}
+                                            <ConditionBadge condition={client.condition} />
+                                        </div>
                                     </td>
 
                                     <td className="px-stack-lg py-4 text-text-muted">
-                                        {client.email_sent && client.last_email_sent_at ? (
-                                            <div
-                                                className="flex flex-col"
-                                                title={fullTime(client.last_email_sent_at)}
-                                            >
+                                        {client.last_activity_at ? (
+                                            <div className="flex flex-col" title={fullTime(client.last_activity_at)}>
                                                 <span className="text-text-primary tnum">
-                                                    {absoluteTime(client.last_email_sent_at)}
+                                                    {absoluteTime(client.last_activity_at)}
                                                 </span>
                                             </div>
-                                        ) : (
-                                            "—"
-                                        )}
+                                        ) : "—"}
+                                    </td>
+
+                                    <td className="px-stack-lg py-4 font-mono text-xs text-action-indigo">
+                                        {client.invoice_number || "—"}
                                     </td>
 
                                     <td className="px-stack-lg py-4 text-right" data-interactive>

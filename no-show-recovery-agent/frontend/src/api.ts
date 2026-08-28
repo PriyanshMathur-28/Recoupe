@@ -1,4 +1,4 @@
-/** Typed client for the Flask recovery API. */
+    /** Typed client for the Flask recovery API. */
 import type { AutopsyContext, AutopsyResponse, BulkSendResult, Client, DashboardFilters } from "./types";
 
 /** Flask injects this into the served document so mutations can be CSRF-checked. */

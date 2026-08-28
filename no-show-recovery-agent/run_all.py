@@ -60,13 +60,18 @@ def run(include_calendar: bool, dashboard: bool, host: str, port: int) -> None:
 
     from main import create_scheduler, process_pending_events
 
-    logging.getLogger(__name__).info("Running initial live scan")
-    results = process_pending_events(include_calendar=include_calendar, live=True)
+    # Background scanning only detects and prepares recovery cases; it never
+    # delivers client emails. Passing live=False keeps the scheduler in
+    # preview mode so nothing is sent automatically. Emails go out solely when
+    # an operator clicks "Send email" on the dashboard, which delivers through
+    # the /api/clients/.../send-email endpoints.
+    logging.getLogger(__name__).info("Running initial detection scan (no automatic email delivery)")
+    results = process_pending_events(include_calendar=include_calendar, live=False)
     logging.getLogger(__name__).info("Initial scan completed: %d events processed", len(results))
 
-    scheduler = create_scheduler(include_calendar=include_calendar, live=True)
+    scheduler = create_scheduler(include_calendar=include_calendar, live=False)
     scheduler.start()
-    logging.getLogger(__name__).info("Live polling started every 60 seconds")
+    logging.getLogger(__name__).info("Detection polling started every 60 seconds (emails require a dashboard send)")
 
     if dashboard:
         _start_dashboard(host, port)

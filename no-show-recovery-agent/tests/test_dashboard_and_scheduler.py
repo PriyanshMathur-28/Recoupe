@@ -61,6 +61,8 @@ def test_client_projection_filters_system_rows_and_keeps_case_audit_trail(tmp_pa
     assert clients[0]["name"] == "Leena"
     assert clients[0]["condition"] == "escalate_human"
     assert clients[0]["payment_status"] == "not_applicable"
+    assert clients[0]["last_activity_at"] == "2026-08-24T10:00:00+00:00"
+    assert clients[0]["invoice_number"].startswith("INV-20260824-")
     assert [event["action"] for event in clients[0]["audit_trail"]] == ["retry_payment", "escalate_human"]
 
 
