@@ -115,21 +115,55 @@ export function CaseDrawer({ client, sending, onClose, onSend, onRequestResend }
                                     <div className={styles.decisionCard}>
                                         <div className={styles.decisionHeader}>
                                             <strong>{client.condition === "retry_payment" ? "Retry Payment" : "Policy decision"}</strong>
-                                            <span>{client.payment_status === "recovered" || client.payment_status === "paid" ? "Recovered" : "In progress"}</span>
+                                            <span>{client.payment_status === "recovered" || client.payment_status === "paid" ? "✓ Recovered" : "In progress"}</span>
                                         </div>
                                         <p className={styles.decisionSummary}>
                                             {client.condition === "retry_payment"
                                                 ? "Retry Payment was selected because the failed membership payment is below the three-attempt limit."
                                                 : client.condition === "escalate_human"
-                                                    ? "Automation stopped and escalated this case for human review."
+                                                    ? "Automation stopped deliberately. A person needs to decide the next step."
                                                     : "The deterministic recovery policy selected this action from the event facts below."}
                                         </p>
+                                        {/* Stopping-rule callout — shows exact rule that fired */}
                                         {client.case.attempt_count !== undefined && (
-                                            <p className={styles.stopRule}>
-                                                Stop rule: {Number(client.case.attempt_count) >= 3 ? "hit - stopped after 3 attempts and escalated to a human" : `not hit - ${client.case.attempt_count} of 3 attempts used`}
-                                            </p>
+                                            <div className={styles.stopRule} style={{ background: Number(client.case.attempt_count) >= 3 ? "var(--error-container, #fce8e8)" : undefined }}>
+                                                {Number(client.case.attempt_count) >= 3
+                                                    ? `🛑 Rule: ${client.case.attempt_count}/3 automated retries exhausted → escalated to human review`
+                                                    : `✅ Rule: ${client.case.attempt_count}/3 retries used — retry still allowed`}
+                                            </div>
+                                        )}
+                                        {client.cooldown_active && client.next_retry_at && (
+                                            <div className={styles.stopRule} style={{ background: "var(--secondary-fixed, #e8f0fe)" }}>
+                                                ⏳ Rule: 24-hour cooldown active — next retry window opens at {new Date(client.next_retry_at).toLocaleString(undefined, { dateStyle: "short", timeStyle: "short" })}
+                                            </div>
+                                        )}
+                                        {(client.case as Record<string, unknown>).escalation_reason === "high_value" && (
+                                            <div className={styles.stopRule} style={{ background: "var(--tertiary-fixed-dim, #f3e8fd)" }}>
+                                                ⚠️ Rule: Subscription amount exceeds ₹5,000 — human sign-off required before automated retry
+                                            </div>
+                                        )}
+                                        {(client.case as Record<string, unknown>).escalation_reason === "validation_error" && (
+                                            <div className={styles.stopRule} style={{ background: "var(--error-container, #fce8e8)" }}>
+                                                🚫 Rule: Record failed data validation — automation stopped, case requires manual review
+                                            </div>
                                         )}
                                         {client.payment_status === "link_created" && <p className={styles.stopRule}>Payment link created; recovery is not counted until a paid webhook confirms settlement.</p>}
+                                        {client.payment_status === "recovered" && client.amount_recovered && (
+                                            <p className={styles.stopRule} style={{ background: "var(--success-container, #e6f4ea)", color: "var(--success, #1a6e30)", fontWeight: 600 }}>
+                                                ✓ Recovered: ₹{client.amount_recovered.toLocaleString("en-IN")} confirmed via Razorpay webhook
+                                                {client.recovered_at && ` on ${new Date(client.recovered_at).toLocaleDateString(undefined, { dateStyle: "medium" })}`}
+                                            </p>
+                                        )}
+                                    </div>
+                                    {/* RBI compliance guardrails */}
+                                    <div className={styles.decisionCard} style={{ marginTop: "0.75rem", fontSize: "0.78rem", color: "var(--text-muted)" }}>
+                                        <strong style={{ display: "block", marginBottom: "0.35rem", fontSize: "0.75rem", textTransform: "uppercase", letterSpacing: "0.05em" }}>RBI e-mandate compliance</strong>
+                                        <ul style={{ margin: 0, paddingLeft: "1.1rem", lineHeight: 1.7 }}>
+                                            <li>Max 3 automated retries per subscription (RBI circular DPSS.CO.PD.No.1431/02.14.003/2019-20)</li>
+                                            <li>24-hour mandatory cooling period between consecutive retry attempts</li>
+                                            <li>No automated outreach between 22:00 and 08:00 IST</li>
+                                            <li>High-value subscriptions (&gt;₹5,000) require human authorisation before retry</li>
+                                        </ul>
                                     </div>
                                 </section>
 
@@ -201,6 +235,17 @@ export function CaseDrawer({ client, sending, onClose, onSend, onRequestResend }
                                     <div><span>Total events</span><strong>{client.audit_trail?.length ?? 0}</strong></div>
                                     <div><span>Payment</span><strong>{client.payment_status.replace(/_/g, " ")}</strong></div>
                                     <div><span>Email</span><strong>{client.email_sent ? "Sent" : "Pending"}</strong></div>
+                                    <div style={{ marginLeft: "auto" }}>
+                                        <a
+                                            href={`/api/clients/${encodeURIComponent(client.client_id)}/audit-export`}
+                                            download
+                                            style={{ display: "inline-flex", alignItems: "center", gap: "0.35rem", fontSize: "0.78rem", color: "var(--action-indigo)", textDecoration: "none", fontWeight: 500 }}
+                                            title="Download this client's complete audit trail as CSV"
+                                        >
+                                            <span className="material-symbols-outlined" style={{ fontSize: "1rem" }} aria-hidden="true">download</span>
+                                            Download audit trail
+                                        </a>
+                                    </div>
                                 </section>
 
                                 {client.invoice_number && (

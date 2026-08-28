@@ -15,6 +15,7 @@ from batch_runner import run_batch
 from modules.audit_log import AUDIT_PATH
 from modules.attempt_tracker import DB_PATH as ATTEMPTS_DB_PATH
 from modules.detector import RECOVERY_CASES_PATH
+from modules.payments import PaymentLinkProviderError
 from modules.razorpay_webhooks import ingest_webhook
 from modules.revenue_autopsy import analyze as analyze_revenue, build_context as build_revenue_context
 from modules.service_layer import RecoveryService
@@ -408,6 +409,67 @@ def clients_api():
     return jsonify(_service().list_clients())
 
 
+@app.get("/api/clients/<client_id>/audit-export")
+def client_audit_export_api(client_id: str):
+    """Stream a client's complete audit trail as a CSV download.
+
+    The export includes every field required for an immutable audit trail:
+    timestamp, case_id, rule_fired, action, channel, and outcome.
+    """
+    client = next((item for item in _service().list_clients() if item["client_id"] == client_id), None)
+    if client is None:
+        return jsonify({"error": "Client not found"}), 404
+    audit_trail = client.get("audit_trail") or []
+    fields = ["timestamp", "case_id", "client_id", "client_name", "rule_fired", "action", "channel", "payment_status", "outcome", "status", "errors", "invoice_number"]
+    rows = []
+    for event in audit_trail:
+        # Infer the rule that fired from the escalation_reason in the case payload.
+        case = client.get("case") or {}
+        rule_fired = ""
+        if event.get("action") == "escalate_human":
+            reason = str(case.get("escalation_reason") or "")
+            rule_fired = {
+                "attempt_limit": f"Rule: {case.get('attempt_count', '?')}/3 retries exhausted → escalated to human",
+                "high_value": f"Rule: subscription_amount > ₹5,000 → human sign-off required",
+                "validation_error": "Rule: invalid record data → escalated to human",
+                "unknown_event_type": "Rule: no automated rule for this event type → escalated to human",
+            }.get(reason, "Rule: automation stopped → human review")
+        elif event.get("action") == "retry_payment":
+            rule_fired = f"Rule: attempt_count < 3 and amount ≤ ₹5,000 → retry_payment"
+        elif event.get("action") == "charge_fee":
+            rule_fired = "Rule: urgency < 2h and not first offense → charge_fee"
+        elif event.get("action") == "friendly_reminder":
+            rule_fired = "Rule: first offense → friendly_reminder"
+        elif event.get("action") == "offer_waitlist":
+            rule_fired = "Rule: urgency ≥ 2h and waitlist match → offer_waitlist"
+        rows.append({
+            "timestamp": event.get("timestamp", ""),
+            "case_id": client.get("invoice_number", ""),
+            "client_id": client_id,
+            "client_name": client.get("name", ""),
+            "rule_fired": rule_fired,
+            "action": event.get("action", ""),
+            "channel": "email" if event.get("action") in {"charge_fee", "retry_payment", "offer_waitlist", "friendly_reminder"} else "internal",
+            "payment_status": event.get("payment_status", ""),
+            "outcome": event.get("outcome", ""),
+            "status": event.get("status", ""),
+            "errors": event.get("errors", ""),
+            "invoice_number": event.get("invoice_number", ""),
+        })
+    output = io.StringIO()
+    writer = csv.DictWriter(output, fieldnames=fields)
+    writer.writeheader()
+    writer.writerows(rows)
+    csv_bytes = output.getvalue().encode("utf-8")
+    safe_name = "".join(c if c.isalnum() or c in "-_." else "_" for c in (client.get("name") or client_id))
+    return send_file(
+        io.BytesIO(csv_bytes),
+        mimetype="text/csv",
+        as_attachment=True,
+        download_name=f"audit-trail-{safe_name}-{datetime.now(timezone.utc).strftime('%Y%m%d')}.csv",
+    )
+
+
 def _recovery_row_count() -> int:
     """Count data rows (excluding the header) in the active recovery CSV."""
     if not RECOVERY_CASES_PATH.exists():
@@ -525,6 +587,8 @@ def send_client_email_api(client_id: str):
         result = _service().send_client_email(client_id, resend=bool(payload.get("resend")))
     except LookupError as exc:
         return jsonify({"error": str(exc)}), 404
+    except PaymentLinkProviderError as exc:
+        return jsonify({"error": str(exc), "code": "payment_link_unavailable"}), 503
     except (TypeError, ValueError, RuntimeError) as exc:
         return jsonify({"error": str(exc)}), 400
     return jsonify(result)

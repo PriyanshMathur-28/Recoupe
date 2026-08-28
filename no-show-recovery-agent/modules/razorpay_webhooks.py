@@ -18,7 +18,8 @@ from .audit_log import AUDIT_PATH, log_event
 
 ROOT = Path(__file__).resolve().parents[1]
 WEBHOOK_DB_PATH = ROOT / "data" / "webhook_events.sqlite3"
-SUPPORTED_EVENTS = {"payment_link.paid", "payment_link.partially_paid", "payment.failed"}
+RECOVERY_DB_PATH = ROOT / "data" / "recovered_cases.sqlite3"
+SUPPORTED_EVENTS = {"payment_link.paid", "payment_link.partially_paid", "payment.failed", "payment.captured"}
 
 
 def verify_signature(body: bytes | str, signature: str, secret: str) -> bool:
@@ -50,6 +51,73 @@ def record_once(event_id: str, event_name: str, payload: dict[str, Any], path: P
             (str(event_id), event_name, datetime.now(timezone.utc).isoformat(), json.dumps(payload, sort_keys=True)),
         )
     return cursor.rowcount == 1
+
+
+def _connect_recovery(path: Path = RECOVERY_DB_PATH) -> sqlite3.Connection:
+    """Open the recovered-cases store, creating the schema on first use."""
+    path.parent.mkdir(parents=True, exist_ok=True)
+    connection = sqlite3.connect(path)
+    connection.row_factory = sqlite3.Row
+    connection.execute(
+        "CREATE TABLE IF NOT EXISTS recovered_cases ("
+        "  client_id TEXT NOT NULL,"
+        "  payment_link_id TEXT,"
+        "  amount_recovered REAL NOT NULL,"
+        "  recovered_at TEXT NOT NULL,"
+        "  event_id TEXT NOT NULL,"
+        "  event_name TEXT NOT NULL,"
+        "  PRIMARY KEY (client_id, event_id)"
+        ")"
+    )
+    connection.commit()
+    return connection
+
+
+def write_recovery_record(
+    client_id: str,
+    amount_recovered: float,
+    payment_link_id: str | None,
+    event_id: str,
+    event_name: str,
+    path: Path = RECOVERY_DB_PATH,
+) -> bool:
+    """Persist a confirmed recovery; return False on duplicate event_id."""
+    recovered_at = datetime.now(timezone.utc).isoformat()
+    with _connect_recovery(path) as connection:
+        cursor = connection.execute(
+            "INSERT OR IGNORE INTO recovered_cases "
+            "(client_id, payment_link_id, amount_recovered, recovered_at, event_id, event_name) "
+            "VALUES (?, ?, ?, ?, ?, ?)",
+            (str(client_id), payment_link_id, float(amount_recovered), recovered_at, str(event_id), str(event_name)),
+        )
+    return cursor.rowcount == 1
+
+
+def get_recovery_record(client_id: str, path: Path = RECOVERY_DB_PATH) -> dict[str, Any] | None:
+    """Return the most recent confirmed recovery for a client, or None."""
+    with _connect_recovery(path) as connection:
+        row = connection.execute(
+            "SELECT client_id, payment_link_id, amount_recovered, recovered_at, event_id, event_name "
+            "FROM recovered_cases WHERE client_id = ? ORDER BY recovered_at DESC LIMIT 1",
+            (str(client_id),),
+        ).fetchone()
+    return dict(row) if row else None
+
+
+def list_recovery_records(path: Path = RECOVERY_DB_PATH) -> dict[str, dict[str, Any]]:
+    """Return all confirmed recovery records keyed by client_id (most recent per client)."""
+    with _connect_recovery(path) as connection:
+        rows = connection.execute(
+            "SELECT client_id, payment_link_id, amount_recovered, recovered_at, event_id, event_name "
+            "FROM recovered_cases ORDER BY recovered_at DESC"
+        ).fetchall()
+    # Keep only the most recent record per client.
+    result: dict[str, dict[str, Any]] = {}
+    for row in rows:
+        cid = str(row["client_id"])
+        if cid not in result:
+            result[cid] = dict(row)
+    return result
 
 
 def normalize_webhook(payload: dict[str, Any], event_id: str | None = None) -> dict[str, Any]:
@@ -86,6 +154,7 @@ def normalize_webhook(payload: dict[str, Any], event_id: str | None = None) -> d
         "payment_link.paid": "recovered",
         "payment_link.partially_paid": "partially_paid",
         "payment.failed": "failed",
+        "payment.captured": "recovered",
     }[event_name]
     return {
         "event_type": "payment_outcome",
@@ -115,12 +184,15 @@ def ingest_webhook(
     event_id: str,
     webhook_path: Path = WEBHOOK_DB_PATH,
     audit_path: Path = AUDIT_PATH,
+    recovery_path: Path = RECOVERY_DB_PATH,
 ) -> dict[str, Any]:
     """Verify, deduplicate, normalize, and audit one Razorpay webhook delivery.
 
     The caller should pass Razorpay's ``x-razorpay-event-id`` header as
     ``event_id``. Duplicate deliveries are acknowledged without adding a second
     audit row, while invalid signatures are rejected before payload parsing.
+    On a confirmed payment (payment_link.paid or payment.captured), a recovery
+    record is written so the dashboard can show real recovered amounts.
     """
     if not str(event_id or "").strip():
         raise ValueError("Razorpay webhook event_id is required")
@@ -136,4 +208,14 @@ def ingest_webhook(
     if not record_once(event_id, str(payload.get("event") or ""), payload, webhook_path):
         return {"duplicate": True, "event_id": event_id, "event": normalized}
     row = log_event(normalized, normalized["recovery_action"], None, normalized["payment_status"], audit_path)
+    # Write a durable recovery record so the dashboard shows confirmed amounts.
+    if normalized.get("payment_status") == "recovered" and normalized.get("client_id"):
+        write_recovery_record(
+            client_id=str(normalized["client_id"]),
+            amount_recovered=float(normalized.get("amount_paid") or normalized.get("amount") or 0),
+            payment_link_id=normalized.get("payment_link_id"),
+            event_id=str(event_id),
+            event_name=str(payload.get("event") or ""),
+            path=recovery_path,
+        )
     return {"duplicate": False, "event_id": event_id, "event": normalized, "audit": row}

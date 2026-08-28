@@ -9,7 +9,7 @@ from modules.detector import normalize_event
 from modules.handlers import handle_action
 from modules.message_generator import generate_message
 from modules.messenger import send_message
-from modules.payments import create_payment_link
+from modules.payments import PaymentLinkProviderError, create_payment_link
 from modules.waitlist import add_to_waitlist, get_next_in_line, mark_slot
 
 
@@ -26,6 +26,18 @@ class FakePaymentLink:
 class FakePaymentClient:
     def __init__(self, response=None):
         self.payment_link = FakePaymentLink(response)
+
+
+class FailingPaymentLink:
+    def create(self, payload):
+        from razorpay.errors import ServerError
+
+        raise ServerError("test mode limit of 30 reached for payment_link")
+
+
+class FailingPaymentClient:
+    def __init__(self):
+        self.payment_link = FailingPaymentLink()
 
 
 class FakeSendRequest:
@@ -88,6 +100,11 @@ def test_payment_validation_is_consistent_and_requires_complete_response():
         create_payment_link("0.001", "Asha", "Fee", "a@example.com", client=FakePaymentClient())
     with pytest.raises(RuntimeError, match="incomplete"):
         create_payment_link(10, "Asha", "Fee", "a@example.com", client=FakePaymentClient({"id": "plink_1"}))
+
+
+def test_payment_link_test_mode_limit_has_an_actionable_error():
+    with pytest.raises(PaymentLinkProviderError, match="Test Mode has reached its payment-link limit"):
+        create_payment_link(10, "Asha", "Fee", "a@example.com", client=FailingPaymentClient())
 
 
 def test_falsey_callable_is_used_for_message_generation():

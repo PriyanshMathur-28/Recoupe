@@ -100,3 +100,59 @@ export function deriveMetrics(clients: Client[]): Metric[] {
         },
     ];
 }
+
+export interface FunnelMetrics {
+    detected: number;
+    detected_value: number;
+    attempted: number;
+    attempted_value: number;
+    /** Webhook-confirmed only — never link_created or preview. */
+    recovered: number;
+    recovered_value: number;
+    still_at_risk: number;
+    still_at_risk_value: number;
+    /** Average hours from first activity to confirmed recovery. Null when no recovered cases. */
+    avg_time_to_recovery_hours: number | null;
+}
+
+const CONFIRMED = new Set(["paid", "recovered"]);
+const ATTEMPTED_ACTIONS = new Set(["charge_fee", "retry_payment", "offer_waitlist", "friendly_reminder"]);
+
+export function deriveFunnel(clients: Client[]): FunnelMetrics {
+    // Detected = all clients in the current batch.
+    const detected = clients.length;
+    const detected_value = sum(clients);
+
+    // Attempted = clients where at least one email-action was taken (email_sent=true).
+    const attempted_clients = clients.filter((c) => c.email_sent || ATTEMPTED_ACTIONS.has(c.condition));
+    const attempted = attempted_clients.length;
+    const attempted_value = sum(attempted_clients);
+
+    // Recovered = only webhook-confirmed (payment_status === "recovered" AND amount_recovered is set).
+    const recovered_clients = clients.filter(
+        (c) => CONFIRMED.has(c.payment_status) && typeof c.amount_recovered === "number" && c.amount_recovered > 0,
+    );
+    const recovered = recovered_clients.length;
+    const recovered_value = recovered_clients.reduce((total, c) => total + (c.amount_recovered ?? 0), 0);
+
+    // Still at risk = attempted but not recovered.
+    const still_at_risk = attempted - recovered;
+    const still_at_risk_value = Math.max(0, attempted_value - recovered_value);
+
+    // Average time to recovery.
+    let avg_time_to_recovery_hours: number | null = null;
+    if (recovered_clients.length > 0) {
+        const times = recovered_clients
+            .map((c) => {
+                const start = c.last_activity_at ? new Date(c.last_activity_at).getTime() : null;
+                const end = c.recovered_at ? new Date(c.recovered_at).getTime() : null;
+                return start && end && end > start ? (end - start) / 3_600_000 : null;
+            })
+            .filter((t): t is number => t !== null);
+        if (times.length > 0) {
+            avg_time_to_recovery_hours = Math.round((times.reduce((a, b) => a + b, 0) / times.length) * 10) / 10;
+        }
+    }
+
+    return { detected, detected_value, attempted, attempted_value, recovered, recovered_value, still_at_risk, still_at_risk_value, avg_time_to_recovery_hours };
+}

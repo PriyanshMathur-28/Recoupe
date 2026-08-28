@@ -74,6 +74,14 @@ export interface Client {
     invoice_filename?: string | null;
     /** Body of the email that was actually delivered, when one was. */
     last_message?: string | null;
+    /** Webhook-confirmed recovery amount (INR). Null until a payment.captured or payment_link.paid fires. */
+    amount_recovered?: number | null;
+    /** ISO timestamp of the confirmed recovery event. */
+    recovered_at?: string | null;
+    /** True when the 24-hour retry cooldown is still active. */
+    cooldown_active?: boolean;
+    /** ISO timestamp when the cooldown window lifts. */
+    next_retry_at?: string | null;
 }
 
 /** Response of POST /api/clients/send-bulk. */

@@ -8,7 +8,8 @@ from pathlib import Path
 from typing import Any
 
 from .audit_log import AUDIT_PATH, log_event
-from .attempt_tracker import DB_PATH as ATTEMPTS_DB_PATH, list_client_email_statuses, list_owner_flags, record_client_email_sent, resolve_owner_flag
+from .attempt_tracker import DB_PATH as ATTEMPTS_DB_PATH, check_cooldown, get_next_retry_at, list_client_email_statuses, list_owner_flags, record_client_email_sent, resolve_owner_flag
+from .razorpay_webhooks import RECOVERY_DB_PATH, list_recovery_records
 from .waitlist import DB_PATH as WAITLIST_DB_PATH, add_to_waitlist, get_next_in_line, list_waitlist, mark_slot, update_waitlist_entry
 
 
@@ -41,10 +42,11 @@ def draft_invoice_number(key: str, timestamp: str) -> str:
 class RecoveryService:
     """Coordinate operational state without coupling callers to storage details."""
 
-    def __init__(self, audit_path: Path = AUDIT_PATH, attempts_path: Path = ATTEMPTS_DB_PATH, waitlist_path: Path = WAITLIST_DB_PATH):
+    def __init__(self, audit_path: Path = AUDIT_PATH, attempts_path: Path = ATTEMPTS_DB_PATH, waitlist_path: Path = WAITLIST_DB_PATH, recovery_path: Path = RECOVERY_DB_PATH):
         self.audit_path = audit_path
         self.attempts_path = attempts_path
         self.waitlist_path = waitlist_path
+        self.recovery_path = recovery_path
 
     def review_flags(self) -> list[dict[str, Any]]:
         return list_owner_flags(self.attempts_path)
@@ -92,6 +94,8 @@ class RecoveryService:
             grouped.setdefault(client_id, []).append((index, row, event))
 
         statuses = list_client_email_statuses(self.attempts_path)
+        # Webhook-confirmed recoveries — the source of truth for ₹ recovered.
+        recovery_records = list_recovery_records(self.recovery_path)
         clients = []
         for client_id, entries in grouped.items():
             entries.sort(key=lambda item: (str(item[1].get("timestamp") or ""), item[0]))
@@ -122,6 +126,18 @@ class RecoveryService:
                 }
                 for _, audit_row, audit_event in entries
             ]
+            # Merge webhook-confirmed recovery — overrides link_created status.
+            recovery = recovery_records.get(client_id)
+            confirmed_payment_status = row.get("payment_status") or "not_applicable"
+            amount_recovered: float | None = None
+            recovered_at: str | None = None
+            if recovery:
+                confirmed_payment_status = "recovered"
+                amount_recovered = float(recovery.get("amount_recovered") or 0)
+                recovered_at = recovery.get("recovered_at")
+            # Cooldown and next-retry window for the UI stopping-rule card.
+            cooldown_active = check_cooldown(client_id, self.attempts_path, action_scope="payment")
+            next_retry_at = get_next_retry_at(client_id, self.attempts_path, action_scope="payment") if cooldown_active else None
             clients.append({
                 "client_id": client_id,
                 "name": row.get("client_name") or event.get("client_name"),
@@ -133,7 +149,7 @@ class RecoveryService:
                 "can_send": condition in MESSAGE_ACTIONS and "@" in str(event.get("client_email") or ""),
                 "case_key": key,
                 "case": event,
-                "payment_status": row.get("payment_status") or "not_applicable",
+                "payment_status": confirmed_payment_status,
                 "outcome": row.get("outcome") or "",
                 "invoice_number": invoice_number,
                 "invoice_status": event.get("invoice_status"),
@@ -141,6 +157,12 @@ class RecoveryService:
                 "invoice_amount": event.get("invoice_amount"),
                 "invoice_filename": event.get("invoice_filename"),
                 "audit_trail": audit_trail,
+                # Webhook-confirmed recovery fields.
+                "amount_recovered": amount_recovered,
+                "recovered_at": recovered_at,
+                # Stopping-rule fields for the UI drawer.
+                "cooldown_active": cooldown_active,
+                "next_retry_at": next_retry_at,
             })
         return sorted(clients, key=lambda item: str(item["name"]).lower())
 

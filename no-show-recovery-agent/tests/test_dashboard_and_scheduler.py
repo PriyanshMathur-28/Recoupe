@@ -7,6 +7,7 @@ from pathlib import Path
 
 from dashboard import app, calculate_metrics
 from main import create_scheduler, process_event
+from modules.payments import PaymentLinkProviderError
 from modules.service_layer import RecoveryService
 
 
@@ -34,6 +35,7 @@ def test_dashboard_metrics_and_route(tmp_path, monkeypatch):
     assert calculate_metrics(rows, [{"id": 1}, {"id": 2}])["escalations"] == 2
 
     monkeypatch.setattr("dashboard.AUDIT_PATH", audit)
+    monkeypatch.setattr("dashboard.DASHBOARD_PASSWORD", "")
     response = app.test_client().get("/dashboard")
     assert response.status_code == 200
     body = response.get_data(as_text=True)
@@ -126,6 +128,21 @@ def test_process_event_claim_is_atomic_across_workers(tmp_path, monkeypatch):
 
     assert len(calls) == 1
     assert sum(result.get("skipped") is True for result in results) == 1
+
+
+def test_send_email_reports_payment_provider_limit_without_http_500(monkeypatch):
+    class FailingService:
+        def send_client_email(self, client_id, resend=False):
+            raise PaymentLinkProviderError("Razorpay Test Mode has reached its payment-link limit. No email was sent.")
+
+    monkeypatch.setattr("dashboard._service", lambda: FailingService())
+    response = app.test_client().post("/api/clients/NS008/send-email", json={})
+
+    assert response.status_code == 503
+    assert response.get_json() == {
+        "code": "payment_link_unavailable",
+        "error": "Razorpay Test Mode has reached its payment-link limit. No email was sent.",
+    }
 
 
 def test_dashboard_mutations_fail_closed_without_credentials(monkeypatch):

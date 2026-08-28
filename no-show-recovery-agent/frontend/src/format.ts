@@ -136,7 +136,29 @@ export function explainCondition(recoveryCase: RecoveryCase, condition: Conditio
         return reasons;
     }
 
-    reasons.push(`Event type "${eventType || "unknown"}" has no automated rule, so it is routed to a person.`);
+    // Explicit escalation_reason tells us exactly which rule routed this case to a human.
+    const escalationReason = String((recoveryCase as Record<string, unknown>).escalation_reason ?? "");
+    if (escalationReason === "attempt_limit") {
+        const attempts = Number(recoveryCase.attempt_count ?? 3);
+        reasons.push(`Membership payment retry limit reached: ${attempts} of 3 automated attempts exhausted.`);
+        reasons.push("Rule: RBI e-mandate framework caps automated retries at 3. Further retries require human sign-off.");
+        return reasons;
+    }
+    if (escalationReason === "high_value") {
+        const amount = recoveryCase.subscription_amount;
+        reasons.push(`Subscription amount ${amount !== undefined ? `₹${Number(amount).toLocaleString("en-IN")}` : ""} exceeds the ₹5,000 high-value threshold.`);
+        reasons.push("Rule: High-value subscriptions require human approval before an automated retry to prevent unauthorised debits.");
+        return reasons;
+    }
+    if (escalationReason === "validation_error") {
+        const errors = recoveryCase.validation_errors ?? [];
+        reasons.push(`The incoming record failed data validation: ${errors.length > 0 ? errors.join("; ") : "one or more fields are missing or unreadable"}.`);
+        reasons.push("Rule: Automation never contacts a client when the case data cannot be validated.");
+        return reasons;
+    }
+
+    reasons.push(`Event type "${eventType || "unknown"}" has no automated recovery rule.`);
+    reasons.push("Rule: Only no_show, calendar_cancellation, and failed_subscription events have automated playbooks. All others are routed to a human.");
     if (condition !== "escalate_human") {
         reasons.push("The stored action predates the current rule set.");
     }

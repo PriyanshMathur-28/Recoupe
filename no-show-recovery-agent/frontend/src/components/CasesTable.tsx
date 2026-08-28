@@ -228,13 +228,15 @@ export function CasesTable({
                                     </td>
 
                                     <td className="px-stack-lg py-4 text-text-muted">
-                                        {client.last_activity_at ? (
+                                        {client.email_sent && client.last_activity_at ? (
                                             <div className="flex flex-col" title={fullTime(client.last_activity_at)}>
                                                 <span className="text-text-primary tnum">
                                                     {absoluteTime(client.last_activity_at)}
                                                 </span>
                                             </div>
-                                        ) : "—"}
+                                        ) : (
+                                            <span title="No email has been sent for this case">No email sent</span>
+                                        )}
                                     </td>
 
                                     <td className="px-stack-lg py-4 font-mono text-xs text-action-indigo">

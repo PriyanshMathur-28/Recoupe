@@ -282,8 +282,8 @@ p {
     height: 56px;
     margin-bottom: 20px;
     place-items: center;
-    border: 1px solid #c7d2fe;
-    border-radius: 16px;
+    /* border: 1px solid #c7d2fe; */
+    /* border-radius: 16px; */
     background: linear-gradient(145deg, #eef2ff, #f5f3ff);
     color: var(--brand);
     box-shadow: 0 12px 34px rgb(79 70 229 / 10%);

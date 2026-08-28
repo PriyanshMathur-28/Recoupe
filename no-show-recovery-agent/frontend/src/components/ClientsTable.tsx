@@ -183,9 +183,15 @@ export function ClientsTable({
                                     </td>
 
                                     <td>
-                                        <span className={`${styles.timestamp} tnum`} title={fullTime(client.last_activity_at)}>
-                                            {absoluteTime(client.last_activity_at)}
-                                        </span>
+                                        {client.email_sent ? (
+                                            <span className={`${styles.timestamp} tnum`} title={fullTime(client.last_activity_at)}>
+                                                {absoluteTime(client.last_activity_at)}
+                                            </span>
+                                        ) : (
+                                            <span className={styles.timestamp} title="No email has been sent for this case">
+                                                No email sent
+                                            </span>
+                                        )}
                                     </td>
 
                                     <td>

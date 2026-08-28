@@ -5,7 +5,7 @@ import argparse
 from pathlib import Path
 from typing import Any, Callable
 
-from modules.attempt_tracker import DB_PATH, MAX_ATTEMPTS, flag_owner, get_attempt_count, increment_attempt, record_client_email_sent
+from modules.attempt_tracker import DB_PATH, MAX_ATTEMPTS, check_rbi_limits, flag_owner, get_attempt_count, increment_attempt, record_client_email_sent
 from modules.audit_log import AUDIT_PATH, audit_db_path, log_event
 from modules.decision_engine import decide
 from modules.detector import get_all_risk_events
@@ -82,6 +82,15 @@ def run_event(event: dict[str, Any], attempts_path: Path = DB_PATH, audit_path: 
         row = log_event(event, action, None, "not_applicable", audit_path, errors=validation_errors, outcome="human_review")
         return {"event": event, "action": action, "attempt_count": attempt_count, "message": None, "client_notified": False, "owner_flag": owner_flag, "audit": row}
 
+    # RBI compliance guard: check attempt cap, cooldown, and quiet-hour rules.
+    if proposed_action in PAYMENT_ACTIONS:
+        source_attempts_for_rbi = event.get("attempt_count", 0) if event.get("event_type") == "failed_subscription" else 0
+        rbi_block = check_rbi_limits(client_id or "unknown", int(source_attempts_for_rbi), attempts_path, action_scope="payment")
+        if rbi_block:
+            owner_flag = flag_owner(client_id or "unknown", rbi_block, attempts_path)
+            row = log_event(event, "escalate_human", None, "not_applicable", audit_path, errors=[rbi_block], outcome="rbi_compliance_block")
+            return {"event": event, "action": "escalate_human", "attempt_count": attempt_count, "message": None, "client_notified": False, "owner_flag": owner_flag, "rbi_block": rbi_block, "audit": row}
+
     payment_status = "not_applicable"
     try:
         if action == "offer_waitlist" and live:
@@ -137,10 +146,35 @@ def run_batch(include_calendar: bool = False, reset_audit: bool = False, reset_a
     if reset_audit:
         for path in (audit_path, audit_db_path(audit_path)):
             if path.exists():
-                path.unlink()
+                try:
+                    path.unlink()
+                except PermissionError:
+                    if path.suffix == ".sqlite3":
+                        import sqlite3
+                        with sqlite3.connect(path) as conn:
+                            try:
+                                conn.execute("DELETE FROM audit_log")
+                            except sqlite3.OperationalError:
+                                pass
+                    elif path.suffix == ".csv":
+                        try:
+                            with open(path, "w", encoding="utf-8") as f:
+                                f.truncate(0)
+                        except OSError:
+                            pass
     clean_preview = not live and attempts_path == DB_PATH and event_loader is None
     if (reset_attempts or clean_preview) and attempts_path.exists():
-        attempts_path.unlink()
+        try:
+            attempts_path.unlink()
+        except PermissionError:
+            import sqlite3
+            with sqlite3.connect(attempts_path) as conn:
+                try:
+                    conn.execute("DELETE FROM client_attempts")
+                    conn.execute("DELETE FROM escalation_flags")
+                    conn.execute("DELETE FROM client_email_status")
+                except sqlite3.OperationalError:
+                    pass
     try:
         events = event_loader() if event_loader is not None else get_all_risk_events(include_calendar=include_calendar)
     except Exception as exc:
