@@ -1,4 +1,4 @@
-    /** Typed client for the Flask recovery API. */
+/** Typed client for the Flask recovery API. */
 import type { AutopsyContext, AutopsyResponse, BulkSendResult, Client, DashboardFilters } from "./types";
 
 /** Flask injects this into the served document so mutations can be CSRF-checked. */
@@ -86,6 +86,20 @@ export const sendClientEmail = (clientId: string, resend = false): Promise<Clien
     request<Client>(`/api/clients/${encodeURIComponent(clientId)}/send-email`, {
         method: "POST",
         body: JSON.stringify({ resend }),
+    });
+
+/** Seed a confirmed recovery for a client via a locally signed webhook (demo/testing). */
+export interface SimulatedRecovery {
+    client_id: string;
+    amount_recovered: number;
+    duplicate: boolean;
+    event_id: string;
+}
+
+/** Route a signed `payment_link.paid` payload through the real ingest path to seed a recovery. */
+export const simulateClientRecovery = (clientId: string): Promise<SimulatedRecovery> =>
+    request<SimulatedRecovery>(`/api/clients/${encodeURIComponent(clientId)}/simulate-recovery`, {
+        method: "POST",
     });
 
 export const fetchRevenueContext = (): Promise<AutopsyContext> => request<AutopsyContext>("/api/revenue-autopsy/context");

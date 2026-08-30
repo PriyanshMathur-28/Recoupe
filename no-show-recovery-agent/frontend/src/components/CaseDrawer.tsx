@@ -16,12 +16,14 @@ import styles from "./CaseDrawer.module.css";
 interface Props {
     client: Client | null;
     sending: boolean;
+    simulating?: boolean;
     onClose: () => void;
     onSend: (client: Client) => void;
     onRequestResend: (client: Client) => void;
+    onSimulateRecovery?: (client: Client) => void;
 }
 
-export function CaseDrawer({ client, sending, onClose, onSend, onRequestResend }: Props) {
+export function CaseDrawer({ client, sending, simulating = false, onClose, onSend, onRequestResend, onSimulateRecovery }: Props) {
     const closeRef = useRef<HTMLButtonElement>(null);
     const [view, setView] = useState<"overview" | "history">("overview");
     const open = client !== null;
@@ -111,35 +113,57 @@ export function CaseDrawer({ client, sending, onClose, onSend, onRequestResend }
                                 </section>
 
                                 <section className={styles.block}>
-                                    <h3 className={styles.blockTitle}>Decision trail</h3>
+                                    <h3 className={styles.blockTitle}>AI proposal → deterministic verdict</h3>
                                     <div className={styles.decisionCard}>
                                         <div className={styles.decisionHeader}>
-                                            <strong>{client.condition === "retry_payment" ? "Retry Payment" : "Policy decision"}</strong>
+                                            <strong>AI diagnosis (read-only)</strong>
+                                            <span>{client.diagnosis_source || "Not recorded"}</span>
+                                        </div>
+                                        <p className={styles.decisionSummary}>
+                                            Root cause: <strong>{(client.root_cause || "unknown").replace(/_/g, " ")}</strong>
+                                            {client.diagnosis_confidence && ` · confidence ${client.diagnosis_confidence}`}. The model proposed only; it had no execution rights.
+                                        </p>
+                                        <div className={styles.decisionHeader} style={{ marginTop: "0.75rem" }}>
+                                            <strong>Policy Engine verdict</strong>
+                                            <span>{client.policy_decision || "Not recorded"}</span>
+                                        </div>
+                                        <p className={styles.decisionSummary}>{client.policy_reason || "No deterministic policy reason was recorded for this legacy case."}</p>
+                                        {client.policy_badge && <div className={styles.stopRule}>{client.policy_badge}</div>}
+                                        {client.case.decline_class && <div className={styles.stopRule}>Failure class: <strong>{client.case.decline_class}</strong> — {client.case.decline_class === "hard" ? "blind retry blocked; payment-method update flow only" : client.case.decline_class === "soft" ? "scheduled retry ladder permitted" : "human judgement required"}</div>}
+                                        <div className={styles.stopRule} style={{ background: client.compliance_check_result === "blocked" ? "var(--error-container, #fce8e8)" : "var(--success-container, #e6f4ea)" }}>
+                                            Compliance gate: {client.compliance_check_result === "blocked" ? "blocked and routed safely" : client.compliance_check_result === "passed" ? "passed" : "not recorded for this legacy event"}
+                                        </div>
+                                    </div>
+                                    <h3 className={styles.blockTitle} style={{ marginTop: "1rem" }}>Execution and stopping rules</h3>
+                                    <div className={styles.decisionCard}>
+                                        <div className={styles.decisionHeader}>
+                                            <strong>{client.condition === "retry_payment" ? "Scheduled Retry" : "Policy decision"}</strong>
                                             <span>{client.payment_status === "recovered" || client.payment_status === "paid" ? "✓ Recovered" : "In progress"}</span>
                                         </div>
                                         <p className={styles.decisionSummary}>
                                             {client.condition === "retry_payment"
-                                                ? "Retry Payment was selected because the failed membership payment is below the three-attempt limit."
-                                                : client.condition === "escalate_human"
-                                                    ? "Automation stopped deliberately. A person needs to decide the next step."
-                                                    : "The deterministic recovery policy selected this action from the event facts below."}
+                                                ? "A soft decline was approved for the persisted 24-hour, 72-hour, then 7-day retry ladder."
+                                                : client.condition === "resend_payment_link"
+                                                    ? "A hard decline cannot be retried blindly; the customer receives a secure payment-method update link."
+                                                    : client.condition === "escalate_human"
+                                                        ? "Automation stopped deliberately. A person needs to decide the next step."
+                                                        : "The deterministic recovery policy selected this action from the event facts below."}
                                         </p>
-                                        {/* Stopping-rule callout — shows exact rule that fired */}
                                         {client.case.attempt_count !== undefined && (
                                             <div className={styles.stopRule} style={{ background: Number(client.case.attempt_count) >= 3 ? "var(--error-container, #fce8e8)" : undefined }}>
                                                 {Number(client.case.attempt_count) >= 3
-                                                    ? `🛑 Rule: ${client.case.attempt_count}/3 automated retries exhausted → escalated to human review`
-                                                    : `✅ Rule: ${client.case.attempt_count}/3 retries used — retry still allowed`}
+                                                    ? `🛑 Product rule: ${client.case.attempt_count}/3 automated attempts exhausted → escalated to human review`
+                                                    : `✅ Product rule: ${client.case.attempt_count}/3 attempts used — an approved action remains possible`}
                                             </div>
                                         )}
                                         {client.cooldown_active && client.next_retry_at && (
                                             <div className={styles.stopRule} style={{ background: "var(--secondary-fixed, #e8f0fe)" }}>
-                                                ⏳ Rule: 24-hour cooldown active — next retry window opens at {new Date(client.next_retry_at).toLocaleString(undefined, { dateStyle: "short", timeStyle: "short" })}
+                                                ⏳ Retry ladder active — next approved window opens at {new Date(client.next_retry_at).toLocaleString(undefined, { dateStyle: "short", timeStyle: "short" })}
                                             </div>
                                         )}
                                         {(client.case as Record<string, unknown>).escalation_reason === "high_value" && (
                                             <div className={styles.stopRule} style={{ background: "var(--tertiary-fixed-dim, #f3e8fd)" }}>
-                                                ⚠️ Rule: Subscription amount exceeds ₹5,000 — human sign-off required before automated retry
+                                                ⚠️ Product rule: Subscription amount exceeds ₹50,000 — human sign-off required before execution
                                             </div>
                                         )}
                                         {(client.case as Record<string, unknown>).escalation_reason === "validation_error" && (
@@ -155,14 +179,15 @@ export function CaseDrawer({ client, sending, onClose, onSend, onRequestResend }
                                             </p>
                                         )}
                                     </div>
-                                    {/* RBI compliance guardrails */}
+                                    {/* Product controls; legal requirements require independent verification. */}
                                     <div className={styles.decisionCard} style={{ marginTop: "0.75rem", fontSize: "0.78rem", color: "var(--text-muted)" }}>
-                                        <strong style={{ display: "block", marginBottom: "0.35rem", fontSize: "0.75rem", textTransform: "uppercase", letterSpacing: "0.05em" }}>RBI e-mandate compliance</strong>
+                                        <strong style={{ display: "block", marginBottom: "0.35rem", fontSize: "0.75rem", textTransform: "uppercase", letterSpacing: "0.05em" }}>Verified product guardrails — not a claim of RBI certification</strong>
                                         <ul style={{ margin: 0, paddingLeft: "1.1rem", lineHeight: 1.7 }}>
-                                            <li>Max 3 automated retries per subscription (RBI circular DPSS.CO.PD.No.1431/02.14.003/2019-20)</li>
-                                            <li>24-hour mandatory cooling period between consecutive retry attempts</li>
-                                            <li>No automated outreach between 22:00 and 08:00 IST</li>
-                                            <li>High-value subscriptions (&gt;₹5,000) require human authorisation before retry</li>
+                                            <li>Maximum 3 automated attempts within a 14-day recovery window</li>
+                                            <li>Persisted retry ladder at approximately 24 hours, 72 hours, and 7 days</li>
+                                            <li>No automated outreach outside the configured 08:00–22:00 IST contact window</li>
+                                            <li>Opt-out, promise-to-pay, decline-class, confidence, and ₹50,000 value gates run before execution</li>
+                                            <li>Verify current legal and scheme requirements with authoritative guidance before production use</li>
                                         </ul>
                                     </div>
                                 </section>
@@ -222,6 +247,12 @@ export function CaseDrawer({ client, sending, onClose, onSend, onRequestResend }
                                         </div>
                                     )}
 
+                                    {client.payment_link_unavailable && (
+                                        <div className={styles.stopRule} style={{ marginTop: "0.75rem", background: "var(--warning-container, #fdf1dc)", color: "var(--warning, #8a5a00)" }}>
+                                            ⚠️ {client.payment_link_note || "The email went out without a fresh payment link because the provider's link limit was reached."}
+                                        </div>
+                                    )}
+
                                     {client.last_message && (
                                         <details className={styles.details}>
                                             <summary className={styles.summary}>Message that was sent</summary>
@@ -270,8 +301,13 @@ export function CaseDrawer({ client, sending, onClose, onSend, onRequestResend }
                                                 <span className={styles.auditDot} aria-hidden="true" />
                                                 <div>
                                                     <strong>{event.action === "escalate_human" ? "Escalated to human" : event.action.replace(/_/g, " ").replace(/\b\w/g, (character) => character.toUpperCase())}</strong>
-                                                    <span>{fullTime(event.timestamp)}</span>
+                                                    <span>{fullTime(event.timestamp)} · {event.actor || "legacy actor"}</span>
                                                     <span>{event.payment_status.replace(/_/g, " ")} · {event.outcome.replace(/_/g, " ") || "recorded"}</span>
+                                                    {event.decision && <small>Policy: {event.decision} · {event.reason_code?.replace(/_/g, " ")}</small>}
+                                                    {event.decision_reason && <small>{event.decision_reason}</small>}
+                                                    {event.policy_badge && <small>{event.policy_badge}</small>}
+                                                    {event.root_cause && <small>Diagnosis: {event.root_cause.replace(/_/g, " ")} ({event.diagnosis_source}, {event.diagnosis_confidence})</small>}
+                                                    {event.idempotency_key && <small>Idempotency: {event.idempotency_key}</small>}
                                                     {event.invoice_number && <small>Invoice {event.invoice_number}</small>}
                                                     {event.errors && <small>{event.errors}</small>}
                                                 </div>
@@ -289,6 +325,18 @@ export function CaseDrawer({ client, sending, onClose, onSend, onRequestResend }
                             <span className={styles.footNote}>
                                 {client.email_sent ? "Re-sending is logged as a new send." : "Sends the current case only."}
                             </span>
+                            {onSimulateRecovery && client.payment_status !== "recovered" && client.payment_status !== "paid" && (
+                                <button
+                                    type="button"
+                                    onClick={() => onSimulateRecovery(client)}
+                                    disabled={simulating}
+                                    title="Seed a confirmed recovery via a signed local webhook (demo/testing)"
+                                    style={{ display: "inline-flex", alignItems: "center", gap: "0.35rem", border: "1px solid var(--border-slate, #d3d8e0)", background: "var(--surface, #fff)", color: "var(--text-primary)", borderRadius: "0.5rem", padding: "0.4rem 0.75rem", fontSize: "0.8rem", fontWeight: 500, cursor: simulating ? "wait" : "pointer", opacity: simulating ? 0.6 : 1 }}
+                                >
+                                    <span className="material-symbols-outlined" style={{ fontSize: "1rem" }} aria-hidden="true">bolt</span>
+                                    {simulating ? "Simulating…" : "Simulate recovery"}
+                                </button>
+                            )}
                             <SendEmailAction
                                 client={client}
                                 sending={sending}

@@ -16,7 +16,7 @@ from modules.audit_log import AUDIT_PATH
 from modules.attempt_tracker import DB_PATH as ATTEMPTS_DB_PATH
 from modules.detector import RECOVERY_CASES_PATH
 from modules.payments import PaymentLinkProviderError
-from modules.razorpay_webhooks import ingest_webhook
+from modules.razorpay_webhooks import ingest_webhook, simulate_paid_webhook
 from modules.revenue_autopsy import analyze as analyze_revenue, build_context as build_revenue_context
 from modules.service_layer import RecoveryService
 from modules.waitlist import DB_PATH as WAITLIST_DB_PATH
@@ -157,12 +157,36 @@ def calculate_metrics(rows: list[dict[str, Any]], review_flags: list[dict[str, A
     retry_paid = sum(1 for row in retries if row.get("payment_status") in {"paid", "recovered"})
     revenue_recovered = sum(_event_amount(row) for row in paid)
 
-    # Failure-reason distribution for the memberships funnel.
+    # Average time to recovery
+    recovery_times = []
+    detected_times = {}
+    from datetime import datetime
+    for row in rows:
+        cid = row.get("client_id")
+        ts = row.get("timestamp")
+        if not cid or not ts: continue
+        if cid not in detected_times:
+            detected_times[cid] = ts
+        if row.get("payment_status") in {"paid", "recovered"}:
+            try:
+                t1 = datetime.fromisoformat(detected_times[cid][:19])
+                t2 = datetime.fromisoformat(ts[:19])
+                diff = (t2 - t1).total_seconds()
+                if diff >= 0:
+                    recovery_times.append(diff)
+            except ValueError:
+                pass
+    avg_time_to_recovery_hours = sum(recovery_times) / len(recovery_times) / 3600 if recovery_times else 0.0
+
+    # Failure-reason distribution and recovery rates for the memberships funnel.
     reason_counts: dict[str, int] = {}
+    reason_recovered: dict[str, int] = {}
     for row in subscriptions:
         reason = str(_event_field(row, "failure_reason") or "unknown").replace("_", " ").title()
         reason_counts[reason] = reason_counts.get(reason, 0) + 1
-    reasons = [{"label": reason, "count": count} for reason, count in reason_counts.items()]
+        if row.get("payment_status") in {"paid", "recovered"}:
+            reason_recovered[reason] = reason_recovered.get(reason, 0) + 1
+    reasons = [{"label": reason, "count": count, "recovered": reason_recovered.get(reason, 0), "rate": _rate(reason_recovered.get(reason, 0), count)} for reason, count in reason_counts.items()]
     reasons.sort(key=lambda item: item["count"], reverse=True)
 
     # Daily activity + recovered revenue series for the KPI sparklines.
@@ -178,6 +202,38 @@ def calculate_metrics(rows: list[dict[str, Any]], review_flags: list[dict[str, A
     recent_days = sorted(by_day)[-7:]
     activity_series = [by_day.get(day, 0) for day in recent_days]
     revenue_series = [round(revenue_by_day.get(day, 0.0)) for day in recent_days]
+
+    cumulative_revenue = 0.0
+    cumulative_series = []
+    for day in sorted(by_day.keys()):
+        cumulative_revenue += revenue_by_day.get(day, 0.0)
+        if day in recent_days:
+            cumulative_series.append(round(cumulative_revenue))
+
+    refill_paid = sum(1 for row in refills if row.get("payment_status") in {"paid", "recovered"})
+    reminders = [row for row in rows if row.get("action") == "friendly_reminder"]
+    reminder_paid = sum(1 for row in reminders if row.get("payment_status") in {"paid", "recovered"})
+    
+    playbooks = [
+        {"label": "Retry Payment", "sent": len(retries), "recovered": retry_paid, "rate": _rate(retry_paid, len(retries))},
+        {"label": "Charge Fee", "sent": len(fees), "recovered": fee_paid, "rate": _rate(fee_paid, len(fees))},
+        {"label": "Offer Waitlist", "sent": len(refills), "recovered": refill_paid, "rate": _rate(refill_paid, len(refills))},
+        {"label": "Friendly Reminder", "sent": len(reminders), "recovered": reminder_paid, "rate": _rate(reminder_paid, len(reminders))},
+    ]
+
+    funnel_clients = set(row.get("client_id") for row in rows if row.get("client_id"))
+    funnel_contacted = set(row.get("client_id") for row in rows if row.get("action") in {"charge_fee", "retry_payment", "offer_waitlist", "friendly_reminder"})
+    funnel_retried = set(row.get("client_id") for row in rows if row.get("action") in {"retry_payment", "friendly_reminder"})
+    funnel_recovered = set(row.get("client_id") for row in rows if row.get("payment_status") in {"paid", "recovered"})
+    funnel_escalated = set(row.get("client_id") for row in rows if row.get("action") == "escalate_human")
+    
+    funnel = {
+        "detected": len(funnel_clients),
+        "contacted": len(funnel_contacted),
+        "retried": len(funnel_retried),
+        "recovered": len(funnel_recovered),
+        "escalated": len(funnel_escalated)
+    }
 
     # Case-mix donut segments (stroke geometry precomputed here to keep the template clean).
     donut_radius = 42.0
@@ -234,6 +290,9 @@ def calculate_metrics(rows: list[dict[str, Any]], review_flags: list[dict[str, A
         "refill_rate": _rate(len(refills), total),
         # Distributions.
         "reason_breakdown": reasons,
+        "playbooks": playbooks,
+        "funnel": funnel,
+        "avg_time_to_recovery_hours": avg_time_to_recovery_hours,
         # Visualization series.
         "activity_series": activity_series,
         "activity_points": _spark_points(activity_series),
@@ -242,6 +301,7 @@ def calculate_metrics(rows: list[dict[str, Any]], review_flags: list[dict[str, A
         "revenue_line": revenue_line,
         "revenue_area": revenue_area,
         "revenue_dots": revenue_dots,
+        "cumulative_points": _spark_points(cumulative_series),
         "mix": {
             "total": mix_total,
             "circumference": round(circumference, 2),
@@ -429,13 +489,13 @@ def client_audit_export_api(client_id: str):
         if event.get("action") == "escalate_human":
             reason = str(case.get("escalation_reason") or "")
             rule_fired = {
-                "attempt_limit": f"Rule: {case.get('attempt_count', '?')}/3 retries exhausted → escalated to human",
-                "high_value": f"Rule: subscription_amount > ₹5,000 → human sign-off required",
+                "attempt_limit": f"Product rule: {case.get('attempt_count', '?')}/3 attempts exhausted → escalated to human",
+                "high_value": "Product rule: amount > ₹50,000 → human sign-off required",
                 "validation_error": "Rule: invalid record data → escalated to human",
                 "unknown_event_type": "Rule: no automated rule for this event type → escalated to human",
             }.get(reason, "Rule: automation stopped → human review")
         elif event.get("action") == "retry_payment":
-            rule_fired = f"Rule: attempt_count < 3 and amount ≤ ₹5,000 → retry_payment"
+            rule_fired = "Product rule: soft decline, attempt_count < 3, age ≤ 14 days, and amount ≤ ₹50,000 → scheduled retry"
         elif event.get("action") == "charge_fee":
             rule_fired = "Rule: urgency < 2h and not first offense → charge_fee"
         elif event.get("action") == "friendly_reminder":
@@ -594,6 +654,48 @@ def send_client_email_api(client_id: str):
     return jsonify(result)
 
 
+@app.post("/api/clients/<client_id>/simulate-recovery")
+def simulate_client_recovery_api(client_id: str):
+    """Seed a confirmed recovery for one client via a signed local webhook.
+
+    Razorpay Test Mode caps payment links at 30 per account, which blocks
+    minting the real links (and thus receiving the real ``payment_link.paid``
+    webhooks) that populate ₹-recovered metrics. This routes a locally signed
+    payload through the *same* verified ``ingest_webhook`` path a live delivery
+    uses, so the seeded settlement is authentic: it writes a durable recovery
+    record and an audit row. It is a demo/testing affordance, not a way to
+    fabricate revenue in production.
+    """
+    client = next((item for item in _service().list_clients() if item["client_id"] == str(client_id)), None)
+    if client is None:
+        return jsonify({"error": "Client not found"}), 404
+    case = client.get("case") or {}
+    amount = case.get("amount", case.get("fee_amount", case.get("appointment_value", case.get("subscription_amount", client.get("invoice_amount")))))
+    try:
+        amount_inr = float(amount)
+    except (TypeError, ValueError):
+        return jsonify({"error": "Client case has no recoverable amount"}), 400
+    action = client.get("condition") or "retry_payment"
+    if action not in {"charge_fee", "retry_payment", "resend_payment_link"}:
+        action = "retry_payment"
+    try:
+        result = simulate_paid_webhook(
+            client_id=str(client_id),
+            amount_inr=amount_inr,
+            client_name=str(client.get("name") or ""),
+            client_email=str(client.get("email") or ""),
+            recovery_action=action,
+        )
+    except ValueError as exc:
+        return jsonify({"error": str(exc)}), 400
+    return jsonify({
+        "client_id": str(client_id),
+        "amount_recovered": amount_inr,
+        "duplicate": bool(result.get("duplicate")),
+        "event_id": result.get("event_id"),
+    })
+
+
 @app.post("/api/clients/send-bulk")
 def send_bulk_clients_api():
     """Deliver selected current client cases sequentially and summarize outcomes."""
@@ -664,21 +766,40 @@ def clients_page():
     return _serve_client_console()
 
 
+def _serve_source_stylesheet(name: str):
+    """Serve a hand-written stylesheet straight from frontend/src/styles.
+
+    These sheets are deliberately kept out of the compiled JS bundle so edits
+    take effect on a simple browser refresh with no npm build step. The
+    no-store header prevents the browser from pinning a stale copy, and
+    send_file's own conditional/ETag handling is disabled for the same reason.
+    """
+    stylesheet = ROOT / "frontend" / "src" / "styles" / name
+    if not stylesheet.exists():
+        return jsonify({"error": f"{name} not found"}), 404
+    response = send_file(stylesheet, mimetype="text/css", conditional=False, etag=False, last_modified=None)
+    response.headers["Cache-Control"] = "no-store, no-cache, must-revalidate, max-age=0"
+    response.headers["Pragma"] = "no-cache"
+    response.headers["Expires"] = "0"
+    return response
+
+
 @app.get("/landing.css")
 def landing_css():
-    """Serve the landing stylesheet straight from source, uncached.
+    """Landing page styles, live-editable without a rebuild."""
+    return _serve_source_stylesheet("landing.css")
 
-    The landing styles are deliberately kept out of the compiled JS bundle so
-    that edits to frontend/src/styles/landing.css take effect on a simple
-    refresh, with no npm build step. The no-store header prevents the browser
-    from pinning a stale copy.
+
+@app.get("/global.css")
+def global_css():
+    """Console/app styles, live-editable without a rebuild.
+
+    global.css is plain CSS (no Tailwind directives or bundler-resolved asset
+    URLs), so it needs no build step and is served from source like landing.css.
+    Only tailwind.css still goes through the bundle, since its @tailwind
+    directives must be compiled.
     """
-    stylesheet = ROOT / "frontend" / "src" / "styles" / "landing.css"
-    if not stylesheet.exists():
-        return jsonify({"error": "landing.css not found"}), 404
-    response = send_file(stylesheet, mimetype="text/css")
-    response.headers["Cache-Control"] = "no-store, must-revalidate"
-    return response
+    return _serve_source_stylesheet("global.css")
 
 
 @app.get("/")

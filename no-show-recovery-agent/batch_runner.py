@@ -5,20 +5,22 @@ import argparse
 from pathlib import Path
 from typing import Any, Callable
 
-from modules.attempt_tracker import DB_PATH, MAX_ATTEMPTS, check_rbi_limits, flag_owner, get_attempt_count, increment_attempt, record_client_email_sent
+from modules.attempt_tracker import DB_PATH, MAX_ATTEMPTS, flag_owner, get_attempt_count, increment_attempt, record_client_email_sent
 from modules.audit_log import AUDIT_PATH, audit_db_path, log_event
-from modules.decision_engine import decide
 from modules.detector import get_all_risk_events
+from modules.diagnosis import diagnose
 from modules.handlers import handle_action
+from modules.policy_engine import DECISIONS_DB_PATH, evaluate, release_key
+from modules.revenue_event import from_detector_event
 from modules.message_generator import generate_message
 from modules.waitlist import DB_PATH as WAITLIST_DB_PATH, notify_waitlist_person
 
-PAYMENT_ACTIONS = {"charge_fee", "retry_payment"}
+PAYMENT_ACTIONS = {"charge_fee", "retry_payment", "resend_payment_link"}
 
 
 def _event_amount(event: dict[str, Any]) -> float:
     """Return the positive INR amount represented by an event."""
-    for key in ("fee_amount", "appointment_value", "subscription_amount"):
+    for key in ("amount", "fee_amount", "appointment_value", "subscription_amount"):
         try:
             amount = float(event.get(key) or 0)
         except (TypeError, ValueError):
@@ -54,76 +56,82 @@ def _offline_message(prompt: str) -> str:
     return "Recovery action prepared for client review."
 
 
-def run_event(event: dict[str, Any], attempts_path: Path = DB_PATH, audit_path: Path = AUDIT_PATH, payment_client: Any = None, llm_call: Callable[[str], str] | None = None, live: bool = False, message_service: Any = None, waitlist_path: Path = WAITLIST_DB_PATH) -> dict[str, Any]:
-    """Process and audit one event, suppressing client contact on escalation."""
-    client_id = str(event.get("client_id") or "")
-    validation_errors = list(event.get("validation_errors") or [])
-    proposed_action = "escalate_human" if validation_errors else decide(event)
-    action = proposed_action
-    attempt_count = None
+def run_event(event: dict[str, Any], attempts_path: Path = DB_PATH, audit_path: Path = AUDIT_PATH, payment_client: Any = None, llm_call: Callable[[str], str] | None = None, live: bool = False, message_service: Any = None, waitlist_path: Path = WAITLIST_DB_PATH, decisions_path: Path = DECISIONS_DB_PATH, now: Any = None) -> dict[str, Any]:
+    """Run detect → typed diagnosis → policy → bounded executor → audit."""
+    # Custom attempt stores (tests, tenants, isolated workers) receive a sibling
+    # policy store so idempotency state cannot leak across environments.
+    if decisions_path == DECISIONS_DB_PATH and attempts_path != DB_PATH:
+        decisions_path = attempts_path.with_name(f"{attempts_path.stem}_policy.sqlite3")
+    canonical = event if "amount" in event and "detected_at" in event else from_detector_event(event, now=now)
+    client_id = str(canonical.get("client_id") or "unknown")
+    baseline = int(canonical.get("attempt_count") or 0)
+    tracked = get_attempt_count(client_id, attempts_path, action_scope="payment") if client_id != "unknown" else 0
+    # Stop before asking the model for another proposal once the bounded
+    # recovery budget has been consumed.
+    if max(baseline, tracked) + 1 >= MAX_ATTEMPTS:
+        proposal = {"root_cause": "attempt_limit", "recommended_intervention": "retry_payment", "confidence": 1.0, "reasoning": "Attempt budget exhausted before diagnosis.", "channel": "none", "urgency": "high", "source": "stopping_rule"}
+    else:
+        proposal = diagnose(canonical, llm=llm_call, use_llm=bool(live and llm_call))
+    # Legacy fixture/backfill events have no provider event identity. They keep
+    # their historical replay semantics; canonical webhook events enforce the
+    # strict per-cycle idempotency reservation.
+    enforce_idempotency = bool(event.get("event_id") or event.get("webhook_event_id"))
+    verdict = evaluate(canonical, proposal, attempts_path=attempts_path, decisions_path=decisions_path, now=now, enforce_idempotency=enforce_idempotency)
+    action = verdict.action
 
-    if proposed_action in PAYMENT_ACTIONS:
-        source_attempts = event.get("attempt_count", 0) if event.get("event_type") == "failed_subscription" else 0
-        baseline = int(source_attempts) if isinstance(source_attempts, int) and not isinstance(source_attempts, bool) else 0
-        # The stopping rule is checked before execution. Technical failures do
-        # not consume a payment attempt; successful action completion commits it.
-        current_attempts = max(baseline, get_attempt_count(client_id, attempts_path, action_scope="payment"))
-        if current_attempts + 1 >= MAX_ATTEMPTS:
-            # A policy-limited third request counts even though contact is
-            # suppressed; only downstream technical failures are non-consuming.
-            attempt_count = increment_attempt(client_id, attempts_path, action_scope="payment", baseline=baseline)
-            action = "escalate_human"
+    if verdict.deferred:
+        row = log_event(canonical, action, None, "not_applicable", audit_path, outcome="deferred", verdict=verdict, diagnosis=proposal, actor="policy_engine")
+        return {"event": canonical, "proposal": proposal, "verdict": verdict.to_dict(), "action": action, "attempt_count": verdict.attempt_number - 1, "message": None, "client_notified": False, "next_attempt_at": verdict.next_attempt_at, "audit": row}
 
-    if action == "escalate_human":
-        reason = "; ".join(validation_errors) if validation_errors else (
-            f"Stopping rule reached at attempt {attempt_count}" if attempt_count else "Decision policy requires human review"
-        )
-        owner_flag = flag_owner(client_id or "unknown", reason, attempts_path)
-        row = log_event(event, action, None, "not_applicable", audit_path, errors=validation_errors, outcome="human_review")
-        return {"event": event, "action": action, "attempt_count": attempt_count, "message": None, "client_notified": False, "owner_flag": owner_flag, "audit": row}
-
-    # RBI compliance guard: check attempt cap, cooldown, and quiet-hour rules.
-    if proposed_action in PAYMENT_ACTIONS:
-        source_attempts_for_rbi = event.get("attempt_count", 0) if event.get("event_type") == "failed_subscription" else 0
-        rbi_block = check_rbi_limits(client_id or "unknown", int(source_attempts_for_rbi), attempts_path, action_scope="payment")
-        if rbi_block:
-            owner_flag = flag_owner(client_id or "unknown", rbi_block, attempts_path)
-            row = log_event(event, "escalate_human", None, "not_applicable", audit_path, errors=[rbi_block], outcome="rbi_compliance_block")
-            return {"event": event, "action": "escalate_human", "attempt_count": attempt_count, "message": None, "client_notified": False, "owner_flag": owner_flag, "rbi_block": rbi_block, "audit": row}
+    if verdict.escalated:
+        # The cap represents a consumed recovery opportunity even when the
+        # stopping rule prevents a third outbound message. Persist that final
+        # attempted rung so the durable counter and audit projection agree.
+        attempt_count = verdict.attempt_number - 1
+        if verdict.reason_code == "attempt_limit" and client_id != "unknown":
+            attempt_count = increment_attempt(
+                client_id,
+                attempts_path,
+                action_scope="payment",
+                baseline=attempt_count,
+            )
+        owner_flag = flag_owner(client_id, verdict.reason, attempts_path)
+        row = log_event(canonical, "escalate_human", None, "not_applicable", audit_path, outcome="human_review", verdict=verdict, diagnosis=proposal, actor="policy_engine")
+        result = {"event": canonical, "proposal": proposal, "verdict": verdict.to_dict(), "action": "escalate_human", "attempt_count": attempt_count, "message": None, "client_notified": False, "owner_flag": owner_flag, "audit": row}
+        if verdict.reason_code == "validation_error":
+            result["error"] = verdict.reason
+        return result
 
     payment_status = "not_applicable"
     try:
         if action == "offer_waitlist" and live:
-            handled = notify_waitlist_person(event, db_path=waitlist_path, service=message_service, llm=llm_call)
-            payment_status = "not_applicable"
+            handled = notify_waitlist_person(canonical, db_path=waitlist_path, service=message_service, llm=llm_call)
             notified = True
+        elif not live and action in PAYMENT_ACTIONS:
+            if _event_amount(canonical) <= 0:
+                raise ValueError(f"{action} requires a positive amount")
+            safe_event = dict(canonical, short_url="https://example.invalid/payment-preview")
+            handled = {**safe_event, "message": generate_message(safe_event, action, llm=_offline_message)}
+            payment_status = "preview_created"
+            notified = False
         else:
-            if not live and action in PAYMENT_ACTIONS:
-                amount = _event_amount(event)
-                if amount <= 0:
-                    raise ValueError(f"{action} requires a positive amount")
-                contact = event.get("client_phone") or event.get("client_email")
-                if not str(contact or "").strip():
-                    raise ValueError(f"{action} requires a client phone or email")
-                safe_event = dict(event, short_url="https://example.invalid/payment-preview")
-                handled = {**safe_event, "message": generate_message(safe_event, action, llm=llm_call or _offline_message)}
-                payment_status = "preview_created"
-            else:
-                handled = handle_action(event, action, payment_client=payment_client, llm_call=llm_call or (_offline_message if not live else None), message_service=message_service, deliver=live)
-                if action in PAYMENT_ACTIONS:
-                    payment_status = "link_created" if live else "preview_created"
+            handled = handle_action(canonical, action, payment_client=payment_client, llm_call=llm_call or (_offline_message if not live else None), message_service=message_service, deliver=live)
+            payment_status = "link_created" if action in PAYMENT_ACTIONS else "not_applicable"
             notified = live
-        if live and notified and event.get("client_email") and handled.get("message"):
+        if live and notified and canonical.get("client_email") and handled.get("message"):
             from modules.service_layer import case_key
-            record_client_email_sent(client_id, action, handled["message"], attempts_path, case_key(event, action))
-        if proposed_action in PAYMENT_ACTIONS:
-            attempt_count = increment_attempt(client_id, attempts_path, action_scope="payment", baseline=baseline)
-        row = log_event(event, action, handled.get("message"), payment_status, audit_path, outcome="action_completed")
-        return {"event": event, "action": action, "attempt_count": attempt_count, "message": handled.get("message"), "client_notified": notified, "payment_status": payment_status, "audit": row}
+            record_client_email_sent(client_id, action, handled["message"], attempts_path, case_key(canonical, action))
+        attempt_count = increment_attempt(client_id, attempts_path, action_scope="payment", baseline=int(canonical.get("attempt_count") or 0)) if action in PAYMENT_ACTIONS else None
+        executed_event = {**canonical, **{key: handled[key] for key in ("payment_link_id", "short_url", "invoice_number", "invoice_status", "invoice_due_date", "invoice_amount", "invoice_filename") if key in handled}}
+        row = log_event(executed_event, action, handled.get("message"), payment_status, audit_path, outcome="action_completed", verdict=verdict, diagnosis=proposal, actor="bounded_executor")
+        return {"event": executed_event, "proposal": proposal, "verdict": verdict.to_dict(), "action": action, "attempt_count": attempt_count, "message": handled.get("message"), "client_notified": notified, "payment_status": payment_status, "audit": row}
     except Exception as exc:
-        owner_flag = flag_owner(client_id or "unknown", f"Action failed: {exc}", attempts_path)
-        row = log_event(event, "escalate_human", None, "failed", audit_path, errors=[str(exc)], outcome="technical_error")
-        return {"event": event, "action": "escalate_human", "attempt_count": attempt_count, "message": None, "client_notified": False, "owner_flag": owner_flag, "error": str(exc), "audit": row}
+        # Provider failures fail closed and release an unexecuted reservation so
+        # retry-with-backoff can safely process the case later.
+        release_key(verdict.idempotency_key, decisions_path)
+        owner_flag = flag_owner(client_id, f"Action failed: {exc}", attempts_path)
+        row = log_event(canonical, "escalate_human", None, "failed", audit_path, errors=[str(exc)], outcome="technical_error", verdict=verdict, diagnosis=proposal, actor="bounded_executor")
+        return {"event": canonical, "proposal": proposal, "verdict": verdict.to_dict(), "action": "escalate_human", "attempt_count": verdict.attempt_number - 1, "message": None, "client_notified": False, "owner_flag": owner_flag, "error": str(exc), "audit": row}
 
 
 def _batch_error_event(error: Exception) -> dict[str, Any]:
@@ -214,8 +222,10 @@ if __name__ == "__main__":
     if args.stage == "decide":
         events = get_all_risk_events(include_calendar=args.include_calendar)
         for event in events:
-            action = "escalate_human" if event.get("validation_errors") else decide(event)
-            print(f"{event.get('client_id', 'unknown')}: {action}")
+            canonical = from_detector_event(event)
+            proposal = diagnose(canonical)
+            verdict = evaluate(canonical, proposal, enforce_idempotency=False)
+            print(f"{event.get('client_id', 'unknown')}: AI proposed {proposal['recommended_intervention']} → policy {verdict.decision}/{verdict.action}")
         raise SystemExit(0)
 
     results = run_batch(

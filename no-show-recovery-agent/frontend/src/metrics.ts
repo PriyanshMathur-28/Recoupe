@@ -10,7 +10,8 @@
  * series — so each card carries a factual sub-line of the same visual weight
  * instead. Point this at a metrics endpoint and the deltas can come back.
  */
-import { caseAmount, formatInr } from "./format";
+import { caseAmount, formatInr, humanize } from "./format";
+import { conditionLabel } from "./types";
 import type { Client } from "./types";
 
 export interface Metric {
@@ -43,7 +44,7 @@ export function deriveMetrics(clients: Client[]): Metric[] {
     // At risk is the full current business-case population. Recovery is only
     // confirmed payment settlement, so the values always share one population.
     const atRisk = sum(clients);
-    const recovered = sum(confirmed);
+    const recovered = confirmed.reduce((total, client) => total + (client.amount_recovered ?? 0), 0);
 
     return [
         {
@@ -104,19 +105,16 @@ export function deriveMetrics(clients: Client[]): Metric[] {
 export interface FunnelMetrics {
     detected: number;
     detected_value: number;
-    attempted: number;
-    attempted_value: number;
-    /** Webhook-confirmed only — never link_created or preview. */
+    contacted: number;
+    retried: number;
     recovered: number;
     recovered_value: number;
-    still_at_risk: number;
-    still_at_risk_value: number;
-    /** Average hours from first activity to confirmed recovery. Null when no recovered cases. */
+    escalated: number;
     avg_time_to_recovery_hours: number | null;
 }
 
 const CONFIRMED = new Set(["paid", "recovered"]);
-const ATTEMPTED_ACTIONS = new Set(["charge_fee", "retry_payment", "offer_waitlist", "friendly_reminder"]);
+const ATTEMPTED_ACTIONS = new Set(["charge_fee", "retry_payment", "resend_payment_link", "offer_waitlist", "friendly_reminder", "firm_reminder", "final_notice"]);
 
 export function deriveFunnel(clients: Client[]): FunnelMetrics {
     // Detected = all clients in the current batch.
@@ -124,27 +122,30 @@ export function deriveFunnel(clients: Client[]): FunnelMetrics {
     const detected_value = sum(clients);
 
     // Attempted = clients where at least one email-action was taken (email_sent=true).
-    const attempted_clients = clients.filter((c) => c.email_sent || ATTEMPTED_ACTIONS.has(c.condition));
-    const attempted = attempted_clients.length;
-    const attempted_value = sum(attempted_clients);
+    const contacted_clients = clients.filter((c) => c.email_sent || ATTEMPTED_ACTIONS.has(c.condition));
+    const contacted = contacted_clients.length;
 
-    // Recovered = only webhook-confirmed (payment_status === "recovered" AND amount_recovered is set).
+    const retried_clients = clients.filter((c) => c.condition === "retry_payment");
+    const retried = retried_clients.length;
+
+    // Recovered requires both a confirmed settlement state and the amount from
+    // the durable recovery record. Never infer recovered rupees from exposure.
     const recovered_clients = clients.filter(
-        (c) => CONFIRMED.has(c.payment_status) && typeof c.amount_recovered === "number" && c.amount_recovered > 0,
+        (c) => (CONFIRMED.has(c.payment_status) || CONFIRMED.has(c.outcome)) && (c.amount_recovered ?? 0) > 0,
     );
     const recovered = recovered_clients.length;
     const recovered_value = recovered_clients.reduce((total, c) => total + (c.amount_recovered ?? 0), 0);
 
-    // Still at risk = attempted but not recovered.
-    const still_at_risk = attempted - recovered;
-    const still_at_risk_value = Math.max(0, attempted_value - recovered_value);
+    const escalated = clients.filter((c) => c.condition === "escalate_human").length;
 
     // Average time to recovery.
     let avg_time_to_recovery_hours: number | null = null;
     if (recovered_clients.length > 0) {
         const times = recovered_clients
             .map((c) => {
-                const start = c.last_activity_at ? new Date(c.last_activity_at).getTime() : null;
+                const detected = c.audit_trail?.find((event) => event.detected_at || event.action === "detected");
+                const startValue = detected?.detected_at || detected?.timestamp;
+                const start = startValue ? new Date(startValue).getTime() : null;
                 const end = c.recovered_at ? new Date(c.recovered_at).getTime() : null;
                 return start && end && end > start ? (end - start) / 3_600_000 : null;
             })
@@ -154,5 +155,108 @@ export function deriveFunnel(clients: Client[]): FunnelMetrics {
         }
     }
 
-    return { detected, detected_value, attempted, attempted_value, recovered, recovered_value, still_at_risk, still_at_risk_value, avg_time_to_recovery_hours };
+    return { detected, detected_value, contacted, retried, recovered, recovered_value, escalated, avg_time_to_recovery_hours };
+}
+
+/** A labelled group of cases with its case count and exposed rupee value. */
+export interface Segment {
+    key: string;
+    label: string;
+    count: number;
+    value: number;
+}
+
+const clientValue = (client: Client): number => caseAmount(client.case) ?? 0;
+
+/** Bucket clients by a key, summing case count and exposed value per bucket. */
+function segment(
+    clients: Client[],
+    keyOf: (client: Client) => string,
+    labelOf: (key: string) => string,
+    sortBy: "value" | "count",
+): Segment[] {
+    const buckets = new Map<string, Segment>();
+    for (const client of clients) {
+        const key = keyOf(client) || "unknown";
+        const entry = buckets.get(key) ?? { key, label: labelOf(key), count: 0, value: 0 };
+        entry.count += 1;
+        entry.value += clientValue(client);
+        buckets.set(key, entry);
+    }
+    const list = [...buckets.values()];
+    return sortBy === "value"
+        ? list.sort((a, b) => b.value - a.value || b.count - a.count)
+        : list.sort((a, b) => b.count - a.count || b.value - a.value);
+}
+
+/** Exposure grouped by the recovery playbook (condition) each case is in. */
+export const valueByCondition = (clients: Client[]): Segment[] =>
+    segment(clients, (client) => client.condition, conditionLabel, "value");
+
+/** Cases grouped by the diagnosed reason the revenue is at risk. */
+export const valueByRootCause = (clients: Client[]): Segment[] =>
+    segment(
+        clients,
+        (client) => String(client.root_cause || (client.case?.failure_reason as string | undefined) || "undiagnosed"),
+        humanize,
+        "count",
+    );
+
+/** Cases grouped by the originating revenue event (no-show vs failed subscription). */
+export const valueByEventType = (clients: Client[]): Segment[] =>
+    segment(clients, (client) => String(client.case?.event_type || "unknown"), humanize, "count");
+
+/** One stage of the honest recovery pipeline. */
+export interface PipelineStage {
+    key: string;
+    label: string;
+    count: number;
+    hint: string;
+    /** Tailwind bar-fill utility. */
+    tone: string;
+    /**
+     * True when this stage is a disjoint outcome of `Detected` rather than a
+     * downstream step of the automated path. Escalated cases never pass through
+     * auto-action/contact/recovery, so they must not be chained into the linear
+     * conversion — they branch off at detection.
+     */
+    branch?: boolean;
+}
+
+/** The two branches a detected case can take, plus the linear automated path. */
+export interface Pipeline {
+    /** Total cases opened from the batch — the base for every conversion. */
+    detected: number;
+    /** Ordered, strictly-nested automated path: recovered ⊆ contacted ⊆ actioned ⊆ detected. */
+    path: PipelineStage[];
+    /** Disjoint human-review branch off detection (not part of the linear path). */
+    branch: PipelineStage;
+}
+
+/**
+ * Honest recovery pipeline. Every stage is a real, observable state from the
+ * API — never inferred from exposure. Detection splits into two branches: the
+ * automated path (auto-actioned → contacted → recovered) and the human-review
+ * branch (escalated). Because escalated cases are disjoint from the automated
+ * path, they are returned separately so callers never chain them into a linear
+ * "% of previous" conversion, which would divide by an unrelated stage.
+ */
+export function derivePipeline(clients: Client[]): Pipeline {
+    const detected = clients.length;
+    const actioned = clients.filter((c) => ATTEMPTED_ACTIONS.has(c.condition)).length;
+    const contacted = clients.filter((c) => c.email_sent).length;
+    const recovered = clients.filter(
+        (c) => (CONFIRMED.has(c.payment_status) || CONFIRMED.has(c.outcome)) && (c.amount_recovered ?? 0) > 0,
+    ).length;
+    const escalated = clients.filter((c) => c.condition === "escalate_human").length;
+    return {
+        detected,
+        path: [
+            { key: "detected", label: "Detected", count: detected, hint: "Cases opened from the batch", tone: "bg-action-indigo" },
+            { key: "actioned", label: "Auto-actioned", count: actioned, hint: "An automated playbook was assigned", tone: "bg-indigo-500" },
+            { key: "contacted", label: "Contacted", count: contacted, hint: "A recovery message was delivered", tone: "bg-amber-500" },
+            { key: "recovered", label: "Recovered", count: recovered, hint: "Webhook-confirmed settlement", tone: "bg-success" },
+        ],
+        branch: { key: "escalated", label: "Escalated", count: escalated, hint: "Routed to human review at detection", tone: "bg-error", branch: true },
+    };
 }

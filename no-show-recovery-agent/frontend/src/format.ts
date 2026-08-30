@@ -146,8 +146,8 @@ export function explainCondition(recoveryCase: RecoveryCase, condition: Conditio
     }
     if (escalationReason === "high_value") {
         const amount = recoveryCase.subscription_amount;
-        reasons.push(`Subscription amount ${amount !== undefined ? `₹${Number(amount).toLocaleString("en-IN")}` : ""} exceeds the ₹5,000 high-value threshold.`);
-        reasons.push("Rule: High-value subscriptions require human approval before an automated retry to prevent unauthorised debits.");
+        reasons.push(`Subscription amount ${amount !== undefined ? `₹${Number(amount).toLocaleString("en-IN")}` : ""} exceeds the ₹50,000 product-policy threshold.`);
+        reasons.push("Product rule: high-value subscriptions require human approval before execution; this is not a claim of a statutory threshold.");
         return reasons;
     }
     if (escalationReason === "validation_error") {

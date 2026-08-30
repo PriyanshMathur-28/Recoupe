@@ -532,9 +532,12 @@ p {
     box-shadow: 0 5px 18px rgb(15 23 42 / 7%);
 }
 
+/* No blue focus treatment on the composer: keep the neutral resting border and
+   drop the brand-colored border + ring that appeared as a blue outline while
+   typing. A subtle shadow lift is all that remains on focus. */
 .autopsy-composer:focus-within {
-    border-color: var(--brand);
-    box-shadow: 0 0 0 3px var(--brand-ring);
+    border-color: #cbd5e1;
+    box-shadow: 0 5px 18px rgb(15 23 42 / 10%);
 }
 
 .autopsy-composer textarea {
@@ -546,6 +549,33 @@ p {
     background: transparent;
     padding: 4px 0;
     outline: 0;
+}
+
+/* Kill every focus outline/ring inside the composer unconditionally.
+   The global `:focus-visible { outline: 2px solid var(--brand) }` rule and the
+   browser's own UA focus ring both target the focused element directly, so they
+   tie or beat a plain descendant rule here. !important on the whole subtree is
+   what actually removes the blue box around the textarea while typing. */
+.autopsy-composer,
+.autopsy-composer *,
+.autopsy-composer:focus,
+.autopsy-composer:focus-within,
+.autopsy-composer:focus-visible,
+.autopsy-composer *:focus,
+.autopsy-composer *:focus-within,
+.autopsy-composer *:focus-visible {
+    outline: none !important;
+    outline-width: 0 !important;
+    outline-color: transparent !important;
+    outline-offset: 0 !important;
+}
+
+/* The textarea must also stay free of any inherited ring/shadow treatment. */
+.autopsy-composer textarea,
+.autopsy-composer textarea:focus,
+.autopsy-composer textarea:focus-visible {
+    box-shadow: none !important;
+    border: 0 !important;
 }
 
 .autopsy-composer button {

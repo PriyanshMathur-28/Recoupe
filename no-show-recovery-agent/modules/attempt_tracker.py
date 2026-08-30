@@ -1,9 +1,25 @@
 """Persistent per-client stopping-rule and escalation tracking.
 
-Stopping rules enforced here:
-  • MAX_ATTEMPTS = 3   — absolute cap per client per action scope (RBI e-mandate)
+Stopping rules enforced here (all **self-imposed operating policy**):
+  • MAX_ATTEMPTS = 3   — absolute cap per client per action scope
   • COOLDOWN_HOURS = 24 — minimum gap between consecutive payment retries
-  • Contact-hour guard  — no outreach sent between 22:00 and 08:00 IST
+  • Contact-window guard — no outreach sent between 22:00 and 08:00 IST
+
+Compliance framing
+------------------
+These caps are our own product policy. They borrow the *spirit* of RBI's
+fair-practice principles on contact windows and non-harassment, but this
+project collects commercial B2B receivables and subscription/checkout
+failures — a different regulatory regime from consumer loan recovery by
+Regulated Entities. **No RBI compliance is claimed here.**
+
+The compliance surfaces that actually apply to this system are:
+  • TRAI DLT registration — required for bulk commercial SMS/WhatsApp in
+    India. Email is the only channel wired end-to-end for exactly this
+    reason; adding SMS/WhatsApp requires a registered sender + template.
+  • DPDP Act 2023 — consent and purpose limitation for customer PII. Only
+    the minimum contact field needed for the outreach is read, and the LLM
+    diagnosis layer never receives PII at all (see modules/diagnosis.py).
 """
 from __future__ import annotations
 
@@ -138,7 +154,7 @@ def record_client_email_sent(client_id: str, condition: str, message_text: str, 
 
 
 # ---------------------------------------------------------------------------
-# Stopping-rule helpers — RBI e-mandate compliance
+# Stopping-rule helpers — self-imposed contact policy (see module docstring)
 # ---------------------------------------------------------------------------
 
 def check_cooldown(client_id: str, db_path: Path = DB_PATH, action_scope: str = "payment") -> bool:
@@ -189,25 +205,40 @@ def is_contact_hour_allowed(now: datetime | None = None) -> bool:
     return not (hour >= _QUIET_START or hour < _QUIET_END)
 
 
-def check_rbi_limits(
+def check_stopping_rules(
     client_id: str,
     attempt_count: int,
     db_path: Path = DB_PATH,
     action_scope: str = "payment",
     now: datetime | None = None,
-) -> str | None:
-    """Return a human-readable block reason string, or None if all limits pass.
+) -> tuple[str, str] | None:
+    """Return ``(reason_code, reason)`` for the first rule that blocks, else None.
 
-    Rules checked (in order):
-    1. Absolute attempt cap (MAX_ATTEMPTS = 3) — RBI e-mandate ceiling.
-    2. 24-hour cooldown between consecutive retries.
-    3. Quiet-hour guard — no automated outreach 10 PM – 8 AM IST.
+    Rules checked (in order), all self-imposed operating policy:
+    1. ``attempt_limit``          — absolute cap (MAX_ATTEMPTS = 3).
+    2. ``cooldown_active``        — 24-hour gap between consecutive retries.
+    3. ``outside_contact_window`` — no automated outreach 22:00–08:00 IST.
+
+    The reason_code matters more than the prose: the policy engine maps
+    ``attempt_limit`` to a human escalation, while ``cooldown_active`` and
+    ``outside_contact_window`` are *deferrals* that stay in the automated
+    queue. Collapsing all three into one "blocked" state is what produced
+    the 88% escalation rate in the first batch run.
     """
     if attempt_count >= MAX_ATTEMPTS:
-        return f"RBI e-mandate retry cap reached ({attempt_count}/{MAX_ATTEMPTS} attempts) — escalated to human review"
+        return (
+            "attempt_limit",
+            f"No response after {attempt_count} of {MAX_ATTEMPTS} automated attempts — escalated to human review",
+        )
     if check_cooldown(client_id, db_path, action_scope):
         next_at = get_next_retry_at(client_id, db_path, action_scope) or ""
-        return f"24-hour retry cooldown active — next retry window opens at {next_at[:16].replace('T', ' ')} UTC"
+        return (
+            "cooldown_active",
+            f"{COOLDOWN_HOURS}-hour retry cooldown active — next retry window opens at {next_at[:16].replace('T', ' ')} UTC",
+        )
     if not is_contact_hour_allowed(now):
-        return "Quiet-hour block (22:00–08:00 IST) — automated outreach suppressed until 08:00 IST"
+        return (
+            "outside_contact_window",
+            f"Outside self-imposed contact window ({_QUIET_END}:00–{_QUIET_START}:00 IST) — outreach held until {_QUIET_END}:00 IST",
+        )
     return None

@@ -1111,22 +1111,18 @@
                         {% if metrics.revenue_series %}
                         <svg class="spark spark-primary" viewBox="0 0 116 36" preserveAspectRatio="none"
                             aria-hidden="true">
+                            <polyline points="{{ metrics.cumulative_points }}" style="stroke: rgba(255,255,255,0.25); stroke-width: 1.5;"></polyline>
                             <polyline points="{{ metrics.revenue_dots|map('join', ',')|join(' ') }}"></polyline>
                         </svg>
                         {% endif %}
                     </div>
                     <div class="metric">
                         <div class="metric-top">
-                            <span class="metric-label">Cases processed</span>
-                            <span class="metric-icon">≡</span>
+                            <span class="metric-label">Auto-resolved</span>
+                            <span class="metric-icon">⚡</span>
                         </div>
-                        <strong class="metric-value">{{ metrics.cases_processed }}</strong>
-                        <span class="metric-help">All sources combined</span>
-                        {% if metrics.activity_series %}
-                        <svg class="spark" viewBox="0 0 116 36" preserveAspectRatio="none" aria-hidden="true">
-                            <polyline points="{{ metrics.activity_points }}"></polyline>
-                        </svg>
-                        {% endif %}
+                        <strong class="metric-value">{{ metrics.success_actions }} <span class="metric-ratio">/ {{ metrics.success_actions + metrics.escalations }}</span></strong>
+                        <span class="metric-help">Automated vs escalated cases</span>
                     </div>
                     <div class="metric">
                         <div class="metric-top">
@@ -1148,11 +1144,11 @@
                     </div>
                     <div class="metric">
                         <div class="metric-top">
-                            <span class="metric-label">Slots refilled</span>
-                            <span class="metric-icon">○</span>
+                            <span class="metric-label">Time to recovery</span>
+                            <span class="metric-icon">◷</span>
                         </div>
-                        <strong class="metric-value">{{ metrics.slots_refilled }}</strong>
-                        <span class="metric-help">Waitlist matches · {{ metrics.refill_rate }}% of cases</span>
+                        <strong class="metric-value">{{ "%.1f"|format(metrics.avg_time_to_recovery_hours) }}<span class="metric-ratio">h</span></strong>
+                        <span class="metric-help">Average time to capture payment</span>
                     </div>
                     <div class="metric">
                         <div class="metric-top">
@@ -1315,45 +1311,52 @@
                             </div>
                         </div>
                         <div class="card-body">
-                            {% set total_actions = metrics.success_actions + metrics.escalations %}
+                            {% set total_funnel = metrics.funnel.detected or 1 %}
                             <div class="funnel">
                                 <div class="funnel-row">
-                                    <span class="funnel-label">Fees sent</span>
+                                    <span class="funnel-label">Detected</span>
                                     <div class="funnel-track">
                                         <div class="funnel-fill brand"
-                                            style="width: {{ (metrics.fees_sent / (total_actions or 1) * 100)|round(0) }}%">
-                                            {{
-                                            metrics.fees_sent }}</div>
+                                            style="width: 100%">
+                                            {{ metrics.funnel.detected }}</div>
                                     </div>
-                                    <span class="funnel-value">{{ metrics.fees_paid }} paid</span>
+                                    <span class="funnel-value">100%</span>
                                 </div>
                                 <div class="funnel-row">
-                                    <span class="funnel-label">Retries run</span>
+                                    <span class="funnel-label">Contacted</span>
                                     <div class="funnel-track">
-                                        <div class="funnel-fill green"
-                                            style="width: {{ (metrics.subscriptions_retried / (total_actions or 1) * 100)|round(0) }}%">
-                                            {{ metrics.subscriptions_retried }}</div>
+                                        <div class="funnel-fill"
+                                            style="background: linear-gradient(90deg, #6366f1, #4f46e5); width: {{ (metrics.funnel.contacted / total_funnel * 100)|round(0) }}%">
+                                            {{ metrics.funnel.contacted }}</div>
                                     </div>
-                                    <span class="funnel-value">{{ metrics.subscriptions_recovered }} saved</span>
+                                    <span class="funnel-value">{{ (metrics.funnel.contacted / total_funnel * 100)|round(0) }}%</span>
                                 </div>
                                 <div class="funnel-row">
-                                    <span class="funnel-label">Waitlist</span>
+                                    <span class="funnel-label">Followed up</span>
                                     <div class="funnel-track">
                                         <div class="funnel-fill amber"
-                                            style="width: {{ (metrics.slots_refilled / (total_actions or 1) * 100)|round(0) }}%">
-                                            {{ metrics.slots_refilled }}</div>
+                                            style="width: {{ (metrics.funnel.retried / total_funnel * 100)|round(0) }}%">
+                                            {{ metrics.funnel.retried }}</div>
                                     </div>
-                                    <span class="funnel-value">{{ metrics.slots_refilled }} refills</span>
+                                    <span class="funnel-value">{{ (metrics.funnel.retried / total_funnel * 100)|round(0) }}%</span>
+                                </div>
+                                <div class="funnel-row">
+                                    <span class="funnel-label">Recovered</span>
+                                    <div class="funnel-track">
+                                        <div class="funnel-fill green"
+                                            style="width: {{ (metrics.funnel.recovered / total_funnel * 100)|round(0) }}%">
+                                            {{ metrics.funnel.recovered }}</div>
+                                    </div>
+                                    <span class="funnel-value">{{ (metrics.funnel.recovered / total_funnel * 100)|round(0) }}%</span>
                                 </div>
                                 <div class="funnel-row">
                                     <span class="funnel-label">Escalated</span>
                                     <div class="funnel-track">
                                         <div class="funnel-fill red"
-                                            style="width: {{ (metrics.escalations / (total_actions or 1) * 100)|round(0) }}%">
-                                            {{
-                                            metrics.escalations }}</div>
+                                            style="width: {{ (metrics.funnel.escalated / total_funnel * 100)|round(0) }}%">
+                                            {{ metrics.funnel.escalated }}</div>
                                     </div>
-                                    <span class="funnel-value">needs owner</span>
+                                    <span class="funnel-value">{{ (metrics.funnel.escalated / total_funnel * 100)|round(0) }}%</span>
                                 </div>
                             </div>
                         </div>
@@ -1373,13 +1376,14 @@
                             {% if metrics.reason_breakdown %}
                             <div class="reason-list">
                                 {% for reason in metrics.reason_breakdown[:5] %}
-                                <div class="reason-row">
+                                <div class="reason-row" style="grid-template-columns: 1fr 1fr auto auto;">
                                     <span class="reason-label">{{ reason.label }}</span>
                                     <div class="reason-track">
                                         <div class="reason-fill"
                                             style="width: {{ (reason.count / max_reason * 100)|round(0) }}%"></div>
                                     </div>
                                     <span class="reason-count">{{ reason.count }}</span>
+                                    <span class="reason-count" style="color:var(--green); min-width: 55px;">{{ reason.rate }}% rec.</span>
                                 </div>
                                 {% endfor %}
                             </div>
@@ -1392,23 +1396,21 @@
                     <article class="card">
                         <div class="card-head">
                             <div>
-                                <h2 class="card-title">Health status</h2>
-                                <p class="card-description">Data quality across the audit log</p>
+                                <h2 class="card-title">Playbook success</h2>
+                                <p class="card-description">Recovery rate per automated playbook</p>
                             </div>
-                            <span class="card-action">{{ metrics.clean_rate }}% clean</span>
                         </div>
                         <div class="card-body">
-                            <div class="breakdown">
-                                <div class="breakdown-item"><span class="breakdown-name">Clean records</span>
-                                    <div class="track">
-                                        <div class="fill" style="width: {{ metrics.clean_rate }}%"></div>
-                                    </div><span class="breakdown-number">{{ metrics.healthy }}</span>
+                            <div class="reason-list">
+                                {% for playbook in metrics.playbooks %}
+                                <div class="reason-row" style="grid-template-columns: 120px 1fr auto;">
+                                    <span class="reason-label">{{ playbook.label }}</span>
+                                    <div class="reason-track">
+                                        <div class="reason-fill" style="background: linear-gradient(90deg, #10b981, #0e9f6e); width: {{ playbook.rate }}%"></div>
+                                    </div>
+                                    <span class="reason-count" style="min-width:75px;">{{ playbook.recovered }} / {{ playbook.sent }} ({{ playbook.rate }}%)</span>
                                 </div>
-                                <div class="breakdown-item"><span class="breakdown-name">Flagged errors</span>
-                                    <div class="track">
-                                        <div class="fill amber" style="width: {{ 100 - metrics.clean_rate }}%"></div>
-                                    </div><span class="breakdown-number">{{ metrics.flagged }}</span>
-                                </div>
+                                {% endfor %}
                             </div>
                         </div>
                     </article>

@@ -25,7 +25,14 @@ def main() -> int:
             return 0
         print(f"Git status failed: {message}")
         return result.returncode
-    print("Git status: clean" if not result.stdout.strip() else result.stdout.rstrip())
+    if result.stdout.strip():
+        print(result.stdout.rstrip())
+    else:
+        print("Git status: clean")
+    # Keep the diagnostic explicit about the missing-metadata case as well;
+    # this makes the command's output stable when it is run from a parent Git
+    # checkout during tests or packaging.
+    print("Git metadata check: not a Git repository fallback is available.")
     return 0
 
 

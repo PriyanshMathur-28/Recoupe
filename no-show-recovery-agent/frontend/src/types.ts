@@ -3,8 +3,12 @@
 export const CONDITIONS = [
     "charge_fee",
     "retry_payment",
+    "resend_payment_link",
     "offer_waitlist",
     "friendly_reminder",
+    "firm_reminder",
+    "final_notice",
+    "detected",
     "escalate_human",
 ] as const;
 
@@ -26,6 +30,9 @@ export interface RecoveryCase {
     waitlist_entry_exists?: boolean;
     attempt_count?: number;
     failure_reason?: string;
+    decline_class?: "soft" | "hard" | "unknown";
+    aging_days?: number;
+    aging_bucket?: string;
     source?: string;
     validation_errors?: string[];
     short_url?: string;
@@ -39,12 +46,26 @@ export interface RecoveryCase {
 
 export interface AuditEvent {
     timestamp: string;
+    detected_at?: string;
     action: string;
     payment_status: string;
     outcome: string;
     status: string;
     errors: string;
     invoice_number?: string;
+    root_cause?: string;
+    diagnosis_source?: string;
+    diagnosis_confidence?: string;
+    decision?: string;
+    reason_code?: string;
+    decision_reason?: string;
+    idempotency_key?: string;
+    attempt_number?: string;
+    max_attempts?: string;
+    contact_window_ok?: string;
+    next_attempt_at?: string;
+    policy_badge?: string;
+    actor?: string;
 }
 
 /** One row of GET /api/clients. */
@@ -74,6 +95,10 @@ export interface Client {
     invoice_filename?: string | null;
     /** Body of the email that was actually delivered, when one was. */
     last_message?: string | null;
+    /** True when the last send went out without a fresh payment link (provider link cap hit). */
+    payment_link_unavailable?: boolean;
+    /** Human-readable reason the payment link could not be minted. */
+    payment_link_note?: string | null;
     /** Webhook-confirmed recovery amount (INR). Null until a payment.captured or payment_link.paid fires. */
     amount_recovered?: number | null;
     /** ISO timestamp of the confirmed recovery event. */
@@ -82,6 +107,14 @@ export interface Client {
     cooldown_active?: boolean;
     /** ISO timestamp when the cooldown window lifts. */
     next_retry_at?: string | null;
+    policy_decision?: string;
+    policy_reason_code?: string;
+    policy_reason?: string;
+    policy_badge?: string;
+    root_cause?: string;
+    diagnosis_source?: string;
+    diagnosis_confidence?: string;
+    compliance_check_result?: "passed" | "blocked" | "not_recorded";
 }
 
 /** Response of POST /api/clients/send-bulk. */
@@ -152,10 +185,16 @@ export const CONDITION_META: Record<Condition, ConditionMeta> = {
         avatar: "bg-error-container text-on-error-container",
     },
     retry_payment: {
-        label: "Retry Payment",
-        blurb: "A membership payment failed and is being retried with a fresh payment link.",
+        label: "Scheduled Retry",
+        blurb: "A soft subscription decline entered the bounded 24h → 72h → 7d retry ladder.",
         badge: "bg-secondary-fixed text-on-secondary-fixed-variant border-secondary-fixed",
         avatar: "bg-secondary-fixed text-on-secondary-fixed-variant",
+    },
+    resend_payment_link: {
+        label: "Update Payment Method",
+        blurb: "A hard decline cannot be retried blindly; a secure payment-method update link is sent.",
+        badge: "bg-primary-fixed text-on-primary-fixed border-primary-fixed",
+        avatar: "bg-primary-fixed text-on-primary-fixed",
     },
     offer_waitlist: {
         label: "Offer Waitlist",
@@ -168,6 +207,24 @@ export const CONDITION_META: Record<Condition, ConditionMeta> = {
         blurb: "A first-time miss — a warm nudge to reschedule, with no fee applied.",
         badge: "bg-tertiary-fixed-dim text-on-tertiary-fixed border-tertiary-fixed-dim",
         avatar: "bg-tertiary-fixed text-on-tertiary-fixed",
+    },
+    firm_reminder: {
+        label: "Firm Reminder",
+        blurb: "The second bounded contact in the recovery sequence.",
+        badge: "bg-secondary-fixed text-on-secondary-fixed-variant border-secondary-fixed",
+        avatar: "bg-secondary-fixed text-on-secondary-fixed-variant",
+    },
+    final_notice: {
+        label: "Final Notice",
+        blurb: "The final permitted contact before automation stops.",
+        badge: "bg-error-container text-on-error-container border-error-container",
+        avatar: "bg-error-container text-on-error-container",
+    },
+    detected: {
+        label: "Detected",
+        blurb: "A verified webhook opened this recovery case; diagnosis is pending.",
+        badge: "bg-surface-container-high text-text-primary border-border-slate",
+        avatar: "bg-surface-container-high text-text-muted",
     },
     escalate_human: {
         label: "Needs Review",

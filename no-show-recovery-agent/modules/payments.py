@@ -14,6 +14,16 @@ class PaymentLinkProviderError(RuntimeError):
     """A safe, actionable failure returned by the payment-link provider."""
 
 
+class PaymentLinkLimitError(PaymentLinkProviderError):
+    """The provider cannot mint any more links (e.g. Razorpay Test Mode cap).
+
+    This is a *recoverable* condition: callers are expected to degrade to a
+    message-only send instead of failing the whole delivery, so it is a distinct
+    subclass a caller can catch specifically while still treating every other
+    provider failure as a hard error.
+    """
+
+
 def _amount_in_paise(amount: Any) -> int:
     """Convert a positive INR amount using explicit two-decimal currency rounding."""
     if isinstance(amount, bool):
@@ -60,9 +70,9 @@ def create_payment_link(amount: Any, name: str, description: str, contact: str, 
     except razorpay.errors.ServerError as exc:
         provider_message = str(exc).strip()
         if "test mode limit" in provider_message.lower() and "payment_link" in provider_message.lower():
-            raise PaymentLinkProviderError(
+            raise PaymentLinkLimitError(
                 "Razorpay Test Mode has reached its payment-link limit. Cancel old test payment links "
-                "in the Razorpay dashboard or use a fresh test account, then try again. No email was sent."
+                "in the Razorpay dashboard or use a fresh test account to mint new links."
             ) from exc
         raise PaymentLinkProviderError(
             "Razorpay could not create the payment link. Try again later; no email was sent."

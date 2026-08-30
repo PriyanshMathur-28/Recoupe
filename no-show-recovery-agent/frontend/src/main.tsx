@@ -1,7 +1,8 @@
 import { StrictMode, useCallback, useEffect, useMemo, useState } from "react";
 import { createRoot } from "react-dom/client";
-import { deriveFunnel } from "./metrics";
-import { ApiError, fetchClients, fetchDataStatus, sendBulkEmails, sendClientEmail } from "./api";
+import { deriveFunnel, derivePipeline, valueByCondition, valueByEventType, valueByRootCause } from "./metrics";
+import type { Segment } from "./metrics";
+import { ApiError, fetchClients, fetchDataStatus, sendBulkEmails, sendClientEmail, simulateClientRecovery } from "./api";
 import { CaseDrawer } from "./components/CaseDrawer";
 import { CsvUploadGate } from "./components/CsvUploadGate";
 import { RevenueAutopsyChat } from "./components/RevenueAutopsyChat";
@@ -13,11 +14,12 @@ import { CONDITIONS, conditionLabel } from "./types";
 import type { AuditEvent, Client, Condition, EmailStatusFilter, SortDirection, SortKey } from "./types";
 import { absoluteTime, caseAmount, formatInr, fullTime, initials } from "./format";
 import { useToasts } from "./hooks/useToasts";
-import "./styles/global.css";
 import "./styles/tailwind.css";
-// landing.css is intentionally NOT bundled here. It is served directly as a
-// standalone stylesheet (see the <link> in index.html and the /landing.css
-// route in dashboard.py) so edits to it take effect on refresh without a build.
+// global.css and landing.css are intentionally NOT bundled here. They are plain
+// CSS served directly as standalone stylesheets (see the <link> tags in
+// index.html and the /global.css and /landing.css routes in dashboard.py) so
+// edits to them take effect on a plain refresh without an npm build. Only
+// tailwind.css is imported, because its @tailwind directives must be compiled.
 
 /**
  * The compiled bundle is served by Flask at three URLs (/, /dashboard,
@@ -74,6 +76,7 @@ function Dashboard() {
     const [sort, setSort] = useState<{ key: SortKey; direction: SortDirection }>({ key: "name", direction: "asc" });
     const [selected, setSelected] = useState<Set<string>>(new Set());
     const [sendingIds, setSendingIds] = useState<Set<string>>(new Set());
+    const [simulatingIds, setSimulatingIds] = useState<Set<string>>(new Set());
     const [bulkSending, setBulkSending] = useState(false);
     const [openClientId, setOpenClientId] = useState<string | null>(null);
     const [confirm, setConfirm] = useState<ConfirmRequest | null>(null);
@@ -88,6 +91,8 @@ function Dashboard() {
     const replaceClient = useCallback((updated: Client) => setClients((current) => current.map((client) => client.client_id === updated.client_id ? updated : client)), []);
     const sendOne = useCallback(async (client: Client, resend = false) => { setSendingIds((current) => new Set(current).add(client.client_id)); try { replaceClient(await sendClientEmail(client.client_id, resend)); setSelected((current) => { const next = new Set(current); next.delete(client.client_id); return next; }); push("success", resend ? "Email resent" : "Email sent", `${client.name} received the current recovery message.`); } catch (error) { push("error", `Could not email ${client.name}`, errorMessage(error)); } finally { setSendingIds((current) => { const next = new Set(current); next.delete(client.client_id); return next; }); } }, [push, replaceClient]);
     const requestResend = useCallback((client: Client) => setConfirm({ title: `Resend email to ${client.name}?`, body: "This duplicate send will be recorded in the audit trail.", confirmLabel: "Resend email", tone: "danger", onConfirm: () => { setConfirmBusy(true); void sendOne(client, true).finally(() => { setConfirmBusy(false); setConfirm(null); }); } }), [sendOne]);
+    const simulateOne = useCallback(async (client: Client) => { setSimulatingIds((current) => new Set(current).add(client.client_id)); try { const result = await simulateClientRecovery(client.client_id); await loadClients(); if (result.duplicate) { push("info", "Recovery already recorded", `${client.name} already had a confirmed recovery.`); } else { push("success", "Recovery seeded", `₹${result.amount_recovered.toLocaleString("en-IN")} confirmed for ${client.name} via a signed webhook.`); } } catch (error) { push("error", `Could not simulate recovery for ${client.name}`, errorMessage(error)); } finally { setSimulatingIds((current) => { const next = new Set(current); next.delete(client.client_id); return next; }); } }, [loadClients, push]);
+    const requestSimulate = useCallback((client: Client) => setConfirm({ title: `Simulate a confirmed recovery for ${client.name}?`, body: "This seeds a settlement through the real signed webhook path so recovery metrics show non-zero. Use it for demos and testing only.", confirmLabel: "Simulate recovery", tone: "danger", onConfirm: () => { setConfirmBusy(true); void simulateOne(client).finally(() => { setConfirmBusy(false); setConfirm(null); }); } }), [simulateOne]);
 
     const activeClients = useMemo(() => clients.filter(activeCase), [clients]);
     const historyRows = useMemo<HistoryRow[]>(() => clients.flatMap((client) => (client.audit_trail ?? []).map((event, index) => ({ ...event, client, eventId: `${client.client_id}-${event.timestamp}-${index}` }))).sort((a, b) => new Date(b.timestamp).getTime() - new Date(a.timestamp).getTime()), [clients]);
@@ -111,66 +116,302 @@ function Dashboard() {
             {workspaceTab === "autopsy" ? <RevenueAutopsyChat filters={{ search, email_status: status, condition, outcome, amount_range: amountRange, view }} onOpenClient={(id) => setOpenClientId(id)} /> : <div className="w-full flex-1 overflow-y-auto p-5 lg:p-margin-desktop"><div className="flex w-full min-w-0 max-w-none flex-col gap-7">{workspaceTab === "analytics" ? <><div className="flex flex-col gap-2"><div className="flex items-center gap-2 text-sm text-text-muted">Revenue Recovery<Icon className="text-[16px]">chevron_right</Icon><strong className="text-text-primary">Analytics</strong></div><div><h1 className="text-3xl font-light tracking-tight">Recovery analytics</h1><p className="mt-1 text-base text-text-muted">Monitor recovery performance across the current cycle and each playbook.</p></div></div><TrendPanel clients={clients} /></> : <><div className="flex flex-col gap-2"><div className="flex items-center gap-2 text-sm text-text-muted">Revenue Recovery<Icon className="text-[16px]">chevron_right</Icon><strong className="text-text-primary">{view === "active" ? "Active Cases" : "History"}</strong></div><div className="flex flex-wrap items-end justify-between gap-4"><div><h1 className="text-3xl font-light tracking-tight">{view === "active" ? "Active cases" : "Recovery history"}</h1><p className="mt-1 text-base text-text-muted">{view === "active" ? "Prioritize every invoice that still needs a decision or action." : "A searchable audit trail of reminders, retries, fees, and resolutions."}</p></div>{view === "history" && <button className="flex items-center gap-2 rounded-lg border border-border-slate bg-surface px-3 py-2 text-sm font-medium shadow-sm hover:bg-surface-container-low" onClick={exportReport}><Icon className="text-[17px]">download</Icon>Export CSV</button>}</div></div>{view === "active" ? <MetricGrid clients={clients} activeClients={activeClients} /> : <HistorySummary rows={historyRows} clients={clients} />}</>}
                 {workspaceTab === "workflow" && <section className="overflow-hidden rounded-xl border border-border-slate bg-surface"><div className="flex flex-wrap items-center justify-between gap-4 border-b border-border-slate bg-surface-subtle/50 px-6 py-4"><div className="flex flex-wrap items-center gap-3"><div className="flex rounded-lg border border-border-slate/50 bg-surface-container-low p-1">{([["all", "All"], ["not-sent", "Not sent"], ["sent", "Sent"]] as const).map(([value, label]) => <button key={value} className={`rounded-md px-3 py-1.5 text-sm font-medium ${status === value ? "border border-border-slate/50 bg-surface text-text-primary shadow-sm" : "text-text-muted hover:text-text-primary"}`} onClick={() => setStatus(value)}>{label}</button>)}</div><select className="rounded-lg border border-border-slate bg-surface px-3 py-1.5 text-sm font-medium" value={condition} onChange={(event) => setCondition(event.target.value as Condition | "all")} aria-label="Filter by condition"><option value="all">All conditions</option>{conditionCounts.map(({ condition: value }) => <option key={value} value={value}>{conditionLabel(value)}</option>)}</select>{view === "active" && <select className="rounded-lg border border-border-slate bg-surface px-3 py-1.5 text-sm font-medium" value={amountRange} onChange={(event) => setAmountRange(event.target.value)} aria-label="Filter by amount"><option value="all">Any amount</option><option value="low">Under ₹10k</option><option value="mid">₹10k – ₹50k</option><option value="high">₹50k+</option></select>}<select className="rounded-lg border border-border-slate bg-surface px-3 py-1.5 text-sm font-medium" value={outcome} onChange={(event) => setOutcome(event.target.value)} aria-label="Filter by outcome"><option value="all">All outcomes</option>{outcomes.map((value) => <option key={value} value={value}>{value.replace(/_/g, " ")}</option>)}</select></div><span className="text-sm font-medium text-text-muted">Showing {view === "active" ? visibleClients.length : visibleHistory.length} {view === "active" ? "active cases" : "events"}{lastRefreshedAt ? ` · Updated ${absoluteTime(lastRefreshedAt.toISOString())}` : ""}</span></div>{view === "active" ? <CaseTable clients={visibleClients} loading={loading} selected={selected} sendingIds={sendingIds} onToggle={toggleSelected} onToggleAll={toggleAll} onSort={changeSort} onOpen={(client) => setOpenClientId(client.client_id)} onSend={(client) => void sendOne(client)} onResend={requestResend} clearFilters={clearFilters} /> : <HistoryTable rows={visibleHistory} onOpen={(client) => setOpenClientId(client.client_id)} clearFilters={clearFilters} />}</section>}</div></div>} </main>
         {selectedClients.length > 0 && view === "active" && <div className="fixed bottom-5 left-1/2 z-20 flex -translate-x-1/2 items-center gap-4 rounded-xl bg-primary-container px-5 py-3 text-sm text-white shadow-xl"><span>{selectedClients.length} selected</span><button className="rounded bg-action-indigo px-3 py-1.5 font-medium" disabled={bulkSending} onClick={() => void sendSelected()}>{bulkSending ? "Sending..." : "Send selected"}</button><button className="text-white/80 hover:text-white" onClick={() => setSelected(new Set())}>Clear</button></div>}
-        <CaseDrawer client={openClient} sending={openClient ? sendingIds.has(openClient.client_id) : false} onClose={() => setOpenClientId(null)} onSend={(client) => void sendOne(client)} onRequestResend={requestResend} /><ConfirmDialog request={confirm} busy={confirmBusy} onCancel={() => setConfirm(null)} /><Toasts toasts={toasts} onDismiss={dismiss} />
+        <CaseDrawer client={openClient} sending={openClient ? sendingIds.has(openClient.client_id) : false} simulating={openClient ? simulatingIds.has(openClient.client_id) : false} onClose={() => setOpenClientId(null)} onSend={(client) => void sendOne(client)} onRequestResend={requestResend} onSimulateRecovery={requestSimulate} /><ConfirmDialog request={confirm} busy={confirmBusy} onCancel={() => setConfirm(null)} /><Toasts toasts={toasts} onDismiss={dismiss} />
     </div>;
 }
 
 function MetricGrid({ clients, activeClients }: { clients: Client[]; activeClients: Client[] }) {
     const funnel = deriveFunnel(clients);
-    const totalValue = activeClients.reduce((sum, client) => sum + (caseAmount(client.case) ?? 0), 0);
+    const rate = Math.round(funnel.recovered / (funnel.detected || 1) * 100);
+    // Cases automation handled without routing to a human. `contacted` already
+    // excludes escalate_human (it only counts ATTEMPTED_ACTIONS conditions), so
+    // the auto-resolved count is simply the non-escalated share of the batch.
+    const autoResolved = Math.max(0, funnel.detected - funnel.escalated);
 
     return (
         <section className="grid grid-cols-1 gap-4 md:grid-cols-2 xl:grid-cols-5">
             <Metric
-                label="Detected"
-                value={formatInr(funnel.detected_value)}
-                note={`${funnel.detected} case${funnel.detected === 1 ? "" : "s"} identified`}
-                icon="search_insights"
-                tone="text-text-muted"
+                label="Total recovered"
+                value={formatInr(funnel.recovered_value)}
+                note={`${funnel.recovered} cases secured`}
+                icon="task_alt"
+                tone="text-success"
             />
             <Metric
-                label="Attempted"
-                value={formatInr(funnel.attempted_value)}
-                note={`${funnel.attempted} case${funnel.attempted === 1 ? "" : "s"} contacted`}
-                icon="send"
+                label="Recovery rate"
+                value={`${rate}%`}
+                note={`${funnel.recovered} of ${funnel.detected} cases`}
+                icon="percent"
                 tone="text-action-indigo"
             />
             <Metric
-                label="Recovered (webhook-confirmed)"
-                value={funnel.recovered > 0 ? formatInr(funnel.recovered_value) : "₹0"}
-                note={funnel.recovered > 0 ? `${funnel.recovered} payment${funnel.recovered === 1 ? "" : "s"} settled` : "Awaiting payment.captured webhook"}
-                icon="task_alt"
-                tone={funnel.recovered > 0 ? "text-success" : "text-text-muted"}
+                label="Avg time to recovery"
+                value={funnel.avg_time_to_recovery_hours !== null ? `${funnel.avg_time_to_recovery_hours}h` : "—"}
+                note="Detection to payment"
+                icon="schedule"
+                tone="text-action-indigo"
             />
             <Metric
-                label="Still at risk"
-                value={formatInr(funnel.still_at_risk_value)}
-                note={`${funnel.still_at_risk} case${funnel.still_at_risk === 1 ? "" : "s"} pending recovery`}
-                icon="account_balance_wallet"
-                tone="text-error"
+                label="Auto-resolved"
+                value={`${autoResolved}`}
+                note={`${funnel.escalated} escalated`}
+                icon="bolt"
+                tone="text-action-indigo"
             />
-            {funnel.avg_time_to_recovery_hours !== null ? (
-                <Metric
-                    label="Avg time to recovery"
-                    value={`${funnel.avg_time_to_recovery_hours}h`}
-                    note="From first action to confirmed payment"
-                    icon="schedule"
-                    tone="text-action-indigo"
-                />
-            ) : (
-                <Metric
-                    label="Value at risk"
-                    value={formatInr(totalValue)}
-                    note={`${activeClients.length} cases need action`}
-                    icon="gavel"
-                    tone="text-text-muted"
-                />
-            )}
+            <Metric
+                label="Active cases"
+                value={`${activeClients.length}`}
+                note="Awaiting resolution"
+                icon="gavel"
+                tone="text-text-muted"
+            />
         </section>
     );
 }
 function Metric({ label, value, note, icon, tone }: { label: string; value: string; note: string; icon: string; tone: string }) { return <div className="flex flex-col gap-3 rounded-xl border border-border-slate bg-surface p-5"><div className="flex items-start justify-between"><span className="text-xs font-semibold uppercase tracking-wider text-text-muted">{label}</span><Icon className={`${tone} opacity-80`}>{icon}</Icon></div><div><div className="text-3xl font-extralight tracking-tight">{value}</div><div className="mt-2 text-sm text-text-muted">{note}</div></div></div>; }
-function TrendPanel({ clients }: { clients: Client[] }) { const points = [0, 1, 2, 3, 4, 5, 6].map((index) => { const value = clients.reduce((sum, client) => sum + (caseAmount(client.case) ?? 0), 0) * (0.72 + index * 0.04); return Math.round(value); }); const max = Math.max(...points, 1); return <section className="grid grid-cols-1 gap-4 xl:grid-cols-[1.4fr_1fr]"><div className="rounded-xl border border-border-slate bg-surface p-6"><div className="flex items-start justify-between"><div><h2 className="text-base font-semibold">Recovery trend</h2><p className="mt-1 text-sm text-text-muted">Value at risk across the current recovery cycle</p></div><span className="rounded-full bg-action-indigo/10 px-2.5 py-1 text-xs font-medium text-action-indigo">Live view</span></div><div className="mt-7 flex h-32 items-end gap-2">{points.map((point, index) => <div key={index} className="group flex flex-1 flex-col items-center gap-2"><div className="w-full rounded-t bg-action-indigo/80 transition-all group-hover:bg-action-indigo" style={{ height: `${Math.max(8, point / max * 100)}%` }} title={formatInr(point)} /><span className="text-[10px] text-text-muted">{index === 6 ? "Now" : `${6 - index}d`}</span></div>)}</div></div><div className="rounded-xl border border-border-slate bg-surface p-6"><h2 className="text-base font-semibold">Recovery by condition</h2><p className="mt-1 text-sm text-text-muted">Success rate is separated by playbook</p><div className="mt-6 grid gap-4">{CONDITIONS.map((condition) => { const cases = clients.filter((client) => client.condition === condition); if (!cases.length) return null; const rate = Math.round(cases.filter(resolved).length / cases.length * 100); return <div key={condition}><div className="mb-1.5 flex justify-between text-sm"><span>{conditionLabel(condition)}</span><strong>{rate}%</strong></div><div className="h-2 rounded-full bg-surface-container-high"><div className="h-2 rounded-full bg-action-indigo" style={{ width: `${rate}%` }} /></div></div>; })}</div></div></section>; }
+
+/** A horizontal bar list where each row is a labelled segment. */
+function SegmentBars({ title, subtitle, segments, unit, emptyLabel }: { title: string; subtitle: string; segments: Segment[]; unit: "value" | "count"; emptyLabel: string }) {
+    const max = Math.max(1, ...segments.map((s) => (unit === "value" ? s.value : s.count)));
+    return (
+        <div className="rounded-xl border border-border-slate bg-surface p-6">
+            <h2 className="text-base font-semibold">{title}</h2>
+            <p className="mt-1 text-sm text-text-muted">{subtitle}</p>
+            <div className="mt-6 flex flex-col gap-3.5">
+                {segments.length === 0 ? (
+                    <p className="text-sm text-text-muted">{emptyLabel}</p>
+                ) : (
+                    segments.slice(0, 6).map((segment) => {
+                        const primary = unit === "value" ? segment.value : segment.count;
+                        return (
+                            <div key={segment.key} className="flex items-center gap-4 text-sm">
+                                <span className="w-36 truncate" title={segment.label}>{segment.label}</span>
+                                <div className="flex-1 h-2.5 rounded-full bg-surface-container-high overflow-hidden">
+                                    <div className="h-full rounded-full bg-action-indigo" style={{ width: `${Math.max(3, (primary / max) * 100)}%` }} />
+                                </div>
+                                <span className="w-28 text-right font-medium tnum">
+                                    {unit === "value" ? formatInr(segment.value) : `${segment.count} case${segment.count === 1 ? "" : "s"}`}
+                                </span>
+                                <span className="w-16 text-right text-xs text-text-muted tnum">
+                                    {unit === "value" ? `${segment.count} case${segment.count === 1 ? "" : "s"}` : formatInr(segment.value)}
+                                </span>
+                            </div>
+                        );
+                    })
+                )}
+            </div>
+        </div>
+    );
+}
+
+/**
+ * Honest recovery pipeline. Detection splits into two branches: the automated
+ * path (auto-actioned → contacted → recovered), whose stages are strictly
+ * nested so a "% of previous" conversion is meaningful, and the disjoint
+ * human-review branch (escalated), which is shown against detection rather than
+ * chained after `recovered`. Every stage is a real, observable API state, never
+ * inferred from exposure.
+ */
+function PipelinePanel({ clients }: { clients: Client[] }) {
+    const { detected, path, branch } = derivePipeline(clients);
+    const top = detected || 1;
+    const branchRate = detected > 0 ? Math.round((branch.count / detected) * 100) : 0;
+    return (
+        <div className="rounded-xl border border-border-slate bg-surface p-6">
+            <h2 className="text-base font-semibold">Recovery pipeline</h2>
+            <p className="mt-1 text-sm text-text-muted">Detection splits into the automated path and human review — every stage is a confirmed state, never inferred</p>
+            <div className="mt-6 flex flex-col gap-3">
+                {path.map((stage, index) => {
+                    const previous = index > 0 ? path[index - 1]!.count : stage.count;
+                    const stepConversion = previous > 0 ? Math.round((stage.count / previous) * 100) : 0;
+                    return (
+                        <div key={stage.key} className="flex items-center gap-4 text-sm">
+                            <span className="w-28 font-medium" title={stage.hint}>{stage.label}</span>
+                            <div className="flex-1 h-6 rounded-md bg-surface-container-high overflow-hidden">
+                                <div className={`h-full ${stage.tone} flex items-center justify-end px-2 text-white text-xs font-bold`} style={{ width: `${Math.max(5, (stage.count / top) * 100)}%` }}>
+                                    {stage.count}
+                                </div>
+                            </div>
+                            <span className="w-20 text-right text-xs text-text-muted">
+                                {index === 0 ? "start" : `${stepConversion}% of prev`}
+                            </span>
+                        </div>
+                    );
+                })}
+            </div>
+            <div className="mt-5 border-t border-border-slate pt-4">
+                <p className="mb-3 text-xs font-semibold uppercase tracking-wider text-text-muted">Human-review branch (off detection)</p>
+                <div className="flex items-center gap-4 text-sm">
+                    <span className="w-28 font-medium" title={branch.hint}>{branch.label}</span>
+                    <div className="flex-1 h-6 rounded-md bg-surface-container-high overflow-hidden">
+                        <div className={`h-full ${branch.tone} flex items-center justify-end px-2 text-white text-xs font-bold`} style={{ width: `${Math.max(5, (branch.count / top) * 100)}%` }}>
+                            {branch.count}
+                        </div>
+                    </div>
+                    <span className="w-20 text-right text-xs text-text-muted">
+                        {`${branchRate}% of all`}
+                    </span>
+                </div>
+            </div>
+        </div>
+    );
+}
+
+/**
+ * Confirmed recovery rate per playbook. `resolved` requires a settled payment
+ * state, so a 0% bar means "no confirmed recoveries yet", not "failed".
+ */
+function ConditionOutcomePanel({ clients }: { clients: Client[] }) {
+    const rows = CONDITIONS.map((condition) => {
+        const cases = clients.filter((client) => client.condition === condition);
+        const recovered = cases.filter(resolved).length;
+        const rate = cases.length ? Math.round((recovered / cases.length) * 100) : 0;
+        return { condition, total: cases.length, recovered, rate };
+    }).filter((row) => row.total > 0).sort((a, b) => b.total - a.total);
+
+    return (
+        <div className="rounded-xl border border-border-slate bg-surface p-6">
+            <h2 className="text-base font-semibold">Outcome by playbook</h2>
+            <p className="mt-1 text-sm text-text-muted">Confirmed recovery rate per assigned action</p>
+            <div className="mt-6 grid gap-4">
+                {rows.length === 0 ? (
+                    <p className="text-sm text-text-muted">No cases loaded.</p>
+                ) : (
+                    rows.map((row) => (
+                        <div key={row.condition}>
+                            <div className="mb-1.5 flex justify-between text-sm">
+                                <span>{conditionLabel(row.condition)}</span>
+                                <strong className="tnum">{row.recovered} / {row.total} ({row.rate}%)</strong>
+                            </div>
+                            <div className="h-2 rounded-full bg-surface-container-high">
+                                <div className="h-2 rounded-full bg-success" style={{ width: `${Math.max(2, row.rate)}%` }} />
+                            </div>
+                        </div>
+                    ))
+                )}
+            </div>
+        </div>
+    );
+}
+
+/** Small headline stat used in the analytics summary strip. */
+function AnalyticStat({ label, value, note, icon, tone }: { label: string; value: string; note: string; icon: string; tone: string }) {
+    return (
+        <div className="flex flex-col gap-3 rounded-xl border border-border-slate bg-surface p-5">
+            <div className="flex items-start justify-between">
+                <span className="text-xs font-semibold uppercase tracking-wider text-text-muted">{label}</span>
+                <Icon className={`${tone} opacity-80`}>{icon}</Icon>
+            </div>
+            <div>
+                <div className="text-3xl font-extralight tracking-tight tnum">{value}</div>
+                <div className="mt-2 text-sm text-text-muted">{note}</div>
+            </div>
+        </div>
+    );
+}
+
+function TrendPanel({ clients }: { clients: Client[] }) {
+    const funnel = useMemo(() => deriveFunnel(clients), [clients]);
+    const byCondition = useMemo(() => valueByCondition(clients), [clients]);
+    const byRootCause = useMemo(() => valueByRootCause(clients), [clients]);
+    const byEventType = useMemo(() => valueByEventType(clients), [clients]);
+
+    const atRisk = funnel.detected_value;
+    const recoveryRate = funnel.detected ? Math.round((funnel.recovered / funnel.detected) * 100) : 0;
+    const escalationRate = funnel.detected ? Math.round((funnel.escalated / funnel.detected) * 100) : 0;
+    const contactRate = funnel.detected ? Math.round((funnel.contacted / funnel.detected) * 100) : 0;
+    const topRisk = byCondition[0];
+
+    return (
+        <section className="flex flex-col gap-4">
+            <div className="grid grid-cols-1 gap-4 md:grid-cols-2 xl:grid-cols-4">
+                <AnalyticStat
+                    label="Value at risk"
+                    value={atRisk > 0 ? formatInr(atRisk) : "—"}
+                    note={`Across ${funnel.detected} active case${funnel.detected === 1 ? "" : "s"}`}
+                    icon="account_balance_wallet"
+                    tone="text-action-indigo"
+                />
+                <AnalyticStat
+                    label="Recovered"
+                    value={formatInr(funnel.recovered_value)}
+                    note={`${funnel.recovered} of ${funnel.detected} case${funnel.detected === 1 ? "" : "s"} settled`}
+                    icon="task_alt"
+                    tone="text-success"
+                />
+                <AnalyticStat
+                    label="Recovery rate"
+                    value={`${recoveryRate}%`}
+                    note={funnel.recovered === 0 ? "Awaiting first settlement" : "Confirmed settlements only"}
+                    icon="percent"
+                    tone="text-action-indigo"
+                />
+                <AnalyticStat
+                    label="Escalation rate"
+                    value={`${escalationRate}%`}
+                    note={`${funnel.escalated} routed to human review`}
+                    icon="gavel"
+                    tone={escalationRate > 40 ? "text-error" : "text-text-muted"}
+                />
+            </div>
+
+            <div className="grid grid-cols-1 gap-4 xl:grid-cols-2">
+                <PipelinePanel clients={clients} />
+                <ConditionOutcomePanel clients={clients} />
+            </div>
+
+            <div className="grid grid-cols-1 gap-4 xl:grid-cols-2">
+                <SegmentBars
+                    title="Exposure by playbook"
+                    subtitle="Where the at-risk rupees are concentrated"
+                    segments={byCondition}
+                    unit="value"
+                    emptyLabel="No active cases loaded."
+                />
+                <SegmentBars
+                    title="Root cause breakdown"
+                    subtitle="Why revenue is at risk, by case volume"
+                    segments={byRootCause}
+                    unit="count"
+                    emptyLabel="No diagnosed causes yet."
+                />
+            </div>
+
+            <div className="grid grid-cols-1 gap-4 xl:grid-cols-2">
+                <SegmentBars
+                    title="Revenue events"
+                    subtitle="No-shows vs failed subscriptions"
+                    segments={byEventType}
+                    unit="count"
+                    emptyLabel="No events recorded."
+                />
+                <div className="rounded-xl border border-border-slate bg-surface p-6">
+                    <h2 className="text-base font-semibold">Batch summary</h2>
+                    <p className="mt-1 text-sm text-text-muted">The current recovery cycle at a glance</p>
+                    <dl className="mt-6 grid grid-cols-2 gap-x-6 gap-y-4 text-sm">
+                        <div className="flex flex-col gap-0.5">
+                            <dt className="text-text-muted">Contact rate</dt>
+                            <dd className="text-lg font-medium tnum">{contactRate}%</dd>
+                        </div>
+                        <div className="flex flex-col gap-0.5">
+                            <dt className="text-text-muted">Cases contacted</dt>
+                            <dd className="text-lg font-medium tnum">{funnel.contacted} / {funnel.detected}</dd>
+                        </div>
+                        <div className="flex flex-col gap-0.5">
+                            <dt className="text-text-muted">Avg time to recovery</dt>
+                            <dd className="text-lg font-medium tnum">{funnel.avg_time_to_recovery_hours !== null ? `${funnel.avg_time_to_recovery_hours}h` : "—"}</dd>
+                        </div>
+                        <div className="flex flex-col gap-0.5">
+                            <dt className="text-text-muted">Largest exposure</dt>
+                            <dd className="text-lg font-medium tnum">{topRisk ? formatInr(topRisk.value) : "—"}</dd>
+                            {topRisk && <dd className="text-xs text-text-muted">{topRisk.label}</dd>}
+                        </div>
+                    </dl>
+                </div>
+            </div>
+        </section>
+    );
+}
 function HistorySummary({ rows, clients }: { rows: HistoryRow[]; clients: Client[] }) { return <section className="grid grid-cols-1 gap-4 md:grid-cols-3"><Metric label="Audit events" value={String(rows.length)} note="Reminders, retries, fees and resolutions" icon="history" tone="text-action-indigo" /><Metric label="Clients tracked" value={String(clients.length)} note="Every client has a scoped timeline" icon="group" tone="text-action-indigo" /><Metric label="Confirmed outcomes" value={String(clients.filter(resolved).length)} note="Paid or recovered cases" icon="task_alt" tone="text-success" /></section>; }
 
 function CaseTable({ clients, loading, selected, sendingIds, onToggle, onToggleAll, onSort, onOpen, onSend, onResend, clearFilters }: { clients: Client[]; loading: boolean; selected: Set<string>; sendingIds: Set<string>; onToggle: (id: string) => void; onToggleAll: (checked: boolean) => void; onSort: (key: SortKey) => void; onOpen: (client: Client) => void; onSend: (client: Client) => void; onResend: (client: Client) => void; clearFilters: () => void }) {

@@ -13,8 +13,8 @@ from .razorpay_webhooks import RECOVERY_DB_PATH, list_recovery_records
 from .waitlist import DB_PATH as WAITLIST_DB_PATH, add_to_waitlist, get_next_in_line, list_waitlist, mark_slot, update_waitlist_entry
 
 
-MESSAGE_ACTIONS = {"charge_fee", "retry_payment", "offer_waitlist", "friendly_reminder"}
-CASE_ACTIONS = MESSAGE_ACTIONS | {"escalate_human"}
+MESSAGE_ACTIONS = {"charge_fee", "retry_payment", "resend_payment_link", "offer_waitlist", "friendly_reminder", "firm_reminder", "final_notice"}
+CASE_ACTIONS = MESSAGE_ACTIONS | {"escalate_human", "detected"}
 
 
 def case_key(event: dict[str, Any], action: str) -> str:
@@ -123,6 +123,19 @@ class RecoveryService:
                     "status": audit_row.get("status") or "",
                     "errors": audit_row.get("errors") or "",
                     "invoice_number": audit_event.get("invoice_number") or "",
+                    "root_cause": audit_row.get("root_cause") or "",
+                    "diagnosis_source": audit_row.get("diagnosis_source") or "",
+                    "diagnosis_confidence": audit_row.get("diagnosis_confidence") or "",
+                    "decision": audit_row.get("decision") or "",
+                    "reason_code": audit_row.get("reason_code") or "",
+                    "decision_reason": audit_row.get("reason") or "",
+                    "idempotency_key": audit_row.get("idempotency_key") or "",
+                    "attempt_number": audit_row.get("attempt_number") or "",
+                    "max_attempts": audit_row.get("max_attempts") or "",
+                    "contact_window_ok": audit_row.get("contact_window_ok") or "",
+                    "next_attempt_at": audit_row.get("next_attempt_at") or "",
+                    "policy_badge": audit_row.get("policy_badge") or "",
+                    "actor": audit_row.get("actor") or "",
                 }
                 for _, audit_row, audit_event in entries
             ]
@@ -138,6 +151,7 @@ class RecoveryService:
             # Cooldown and next-retry window for the UI stopping-rule card.
             cooldown_active = check_cooldown(client_id, self.attempts_path, action_scope="payment")
             next_retry_at = get_next_retry_at(client_id, self.attempts_path, action_scope="payment") if cooldown_active else None
+            decision_row = next((audit_row for _, audit_row, _ in reversed(entries) if audit_row.get("decision")), row)
             clients.append({
                 "client_id": client_id,
                 "name": row.get("client_name") or event.get("client_name"),
@@ -162,7 +176,15 @@ class RecoveryService:
                 "recovered_at": recovered_at,
                 # Stopping-rule fields for the UI drawer.
                 "cooldown_active": cooldown_active,
-                "next_retry_at": next_retry_at,
+                "next_retry_at": decision_row.get("next_attempt_at") or next_retry_at,
+                "policy_decision": decision_row.get("decision") or "",
+                "policy_reason_code": decision_row.get("reason_code") or "",
+                "policy_reason": decision_row.get("reason") or "",
+                "policy_badge": decision_row.get("policy_badge") or "",
+                "root_cause": decision_row.get("root_cause") or "",
+                "diagnosis_source": decision_row.get("diagnosis_source") or "",
+                "diagnosis_confidence": decision_row.get("diagnosis_confidence") or "",
+                "compliance_check_result": "passed" if decision_row.get("contact_window_ok") == "true" else ("blocked" if decision_row.get("contact_window_ok") == "false" else "not_recorded"),
             })
         return sorted(clients, key=lambda item: str(item["name"]).lower())
 
@@ -181,12 +203,19 @@ class RecoveryService:
         status = record_client_email_sent(client["client_id"], client["condition"], handled["message"], self.attempts_path, client["case_key"])
         if handled.get("invoice_number"):
             log_event(handled, client["condition"], f"Invoice {handled['invoice_number']} generated and sent", "link_created", self.audit_path, outcome="invoice_sent")
+        elif handled.get("payment_link_unavailable"):
+            # The message went out without a fresh payment link because the
+            # provider is out of link budget. Record the degraded send so the
+            # audit trail shows the email was still delivered.
+            log_event(handled, client["condition"], handled.get("payment_link_note") or "Payment link unavailable; message sent without a new link", "sent", self.audit_path, outcome="sent_without_link")
         return {
             **client,
             "email_sent": True,
             "last_email_sent_at": status["last_email_sent_at"],
             "last_message": handled["message"],
             "delivery": handled.get("delivery"),
+            "payment_link_unavailable": bool(handled.get("payment_link_unavailable")),
+            "payment_link_note": handled.get("payment_link_note"),
             "invoice_number": handled.get("invoice_number"),
             "invoice_status": handled.get("invoice_status"),
             "invoice_due_date": handled.get("invoice_due_date"),
