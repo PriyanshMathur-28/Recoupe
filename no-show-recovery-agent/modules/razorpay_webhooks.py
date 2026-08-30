@@ -59,8 +59,23 @@ def record_once(event_id: str, event_name: str, payload: dict[str, Any], path: P
     return cursor.rowcount == 1
 
 
+# Every column a caller may read back. ``recovered_via`` and
+# ``recovery_triggered_at`` carry the attribution decision, which is made exactly
+# once (at webhook time) and never recomputed by a later query.
+RECOVERY_FIELDS = (
+    "client_id",
+    "payment_link_id",
+    "amount_recovered",
+    "recovered_at",
+    "event_id",
+    "event_name",
+    "recovered_via",
+    "recovery_triggered_at",
+)
+
+
 def _connect_recovery(path: Path = RECOVERY_DB_PATH) -> sqlite3.Connection:
-    """Open the recovered-cases store, creating the schema on first use."""
+    """Open the recovered-cases store, creating or widening the schema on first use."""
     path.parent.mkdir(parents=True, exist_ok=True)
     connection = sqlite3.connect(path)
     connection.row_factory = sqlite3.Row
@@ -72,9 +87,15 @@ def _connect_recovery(path: Path = RECOVERY_DB_PATH) -> sqlite3.Connection:
         "  recovered_at TEXT NOT NULL,"
         "  event_id TEXT NOT NULL,"
         "  event_name TEXT NOT NULL,"
+        "  recovered_via TEXT NOT NULL DEFAULT '',"
+        "  recovery_triggered_at TEXT NOT NULL DEFAULT '',"
         "  PRIMARY KEY (client_id, event_id)"
         ")"
     )
+    existing = {row[1] for row in connection.execute("PRAGMA table_info(recovered_cases)")}
+    for column in ("recovered_via", "recovery_triggered_at"):
+        if column not in existing:
+            connection.execute(f"ALTER TABLE recovered_cases ADD COLUMN {column} TEXT NOT NULL DEFAULT ''")
     connection.commit()
     return connection
 
@@ -86,15 +107,34 @@ def write_recovery_record(
     event_id: str,
     event_name: str,
     path: Path = RECOVERY_DB_PATH,
+    recovered_via: str | None = None,
+    recovery_triggered_at: str | None = None,
 ) -> bool:
-    """Persist a confirmed recovery; return False on duplicate event_id."""
+    """Persist a confirmed recovery; return False on duplicate event_id.
+
+    The amount, the payment instant, the attributed channel and the instant that
+    channel acted are written in ONE statement. There is deliberately no
+    follow-up UPDATE to fill in attribution, because a row that exists with
+    ``recovered_at`` set but ``recovered_via`` still blank would make "₹
+    recovered via voice" silently undercount for as long as the gap lasted.
+    """
     recovered_at = datetime.now(timezone.utc).isoformat()
     with _connect_recovery(path) as connection:
         cursor = connection.execute(
             "INSERT OR IGNORE INTO recovered_cases "
-            "(client_id, payment_link_id, amount_recovered, recovered_at, event_id, event_name) "
-            "VALUES (?, ?, ?, ?, ?, ?)",
-            (str(client_id), payment_link_id, float(amount_recovered), recovered_at, str(event_id), str(event_name)),
+            "(client_id, payment_link_id, amount_recovered, recovered_at, event_id, event_name, "
+            "recovered_via, recovery_triggered_at) "
+            "VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+            (
+                str(client_id),
+                payment_link_id,
+                float(amount_recovered),
+                recovered_at,
+                str(event_id),
+                str(event_name),
+                str(recovered_via or ""),
+                str(recovery_triggered_at or ""),
+            ),
         )
     return cursor.rowcount == 1
 
@@ -103,7 +143,7 @@ def get_recovery_record(client_id: str, path: Path = RECOVERY_DB_PATH) -> dict[s
     """Return the most recent confirmed recovery for a client, or None."""
     with _connect_recovery(path) as connection:
         row = connection.execute(
-            "SELECT client_id, payment_link_id, amount_recovered, recovered_at, event_id, event_name "
+            "SELECT " + ", ".join(RECOVERY_FIELDS) + " "
             "FROM recovered_cases WHERE client_id = ? ORDER BY recovered_at DESC LIMIT 1",
             (str(client_id),),
         ).fetchone()
@@ -114,7 +154,7 @@ def list_recovery_records(path: Path = RECOVERY_DB_PATH) -> dict[str, dict[str, 
     """Return all confirmed recovery records keyed by client_id (most recent per client)."""
     with _connect_recovery(path) as connection:
         rows = connection.execute(
-            "SELECT client_id, payment_link_id, amount_recovered, recovered_at, event_id, event_name "
+            "SELECT " + ", ".join(RECOVERY_FIELDS) + " "
             "FROM recovered_cases ORDER BY recovered_at DESC"
         ).fetchall()
     # Keep only the most recent record per client.
@@ -253,6 +293,21 @@ def ingest_webhook(
     row = log_event(normalized, normalized["recovery_action"], None, normalized["payment_status"], audit_path, actor="webhook_ingestion")
     # Write a durable recovery record so the dashboard shows confirmed amounts.
     if normalized.get("payment_status") == "recovered" and normalized.get("client_id"):
+        # Attribution is decided HERE, once, at the moment payment is confirmed:
+        # the newest call attempt is compared against the newest confirmed email
+        # send, and whichever acted last gets the credit. Both the winning channel
+        # and the instant it acted are handed to write_recovery_record so they land
+        # in the same INSERT as the amount and recovered_at. Nothing recomputes
+        # this later, which is what lets "Avg time to payment" be a subtraction of
+        # two columns on one row instead of a join back into the call log.
+        #
+        # Imported inside the function on purpose: voice_calls reads recovery rows
+        # back out of this module, so a module-level import would close that loop.
+        from .voice_calls import attribute_recovery
+
+        recovered_via, recovery_triggered_at = attribute_recovery(
+            str(normalized["client_id"]), audit_path=audit_path
+        )
         write_recovery_record(
             client_id=str(normalized["client_id"]),
             amount_recovered=float(normalized.get("amount_paid") or normalized.get("amount") or 0),
@@ -260,6 +315,8 @@ def ingest_webhook(
             event_id=str(event_id),
             event_name=str(payload.get("event") or ""),
             path=recovery_path,
+            recovered_via=recovered_via,
+            recovery_triggered_at=recovery_triggered_at,
         )
     return {"duplicate": False, "event_id": event_id, "event": normalized, "audit": row}
 

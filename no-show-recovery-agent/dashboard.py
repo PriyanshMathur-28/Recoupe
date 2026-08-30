@@ -19,6 +19,13 @@ from modules.payments import PaymentLinkProviderError
 from modules.razorpay_webhooks import ingest_webhook, simulate_paid_webhook
 from modules.revenue_autopsy import analyze as analyze_revenue, build_context as build_revenue_context
 from modules.service_layer import RecoveryService
+from modules.vapi_client import (
+    config_status,
+    start_web_call,
+    complete_web_call,
+    ingest_webhook as ingest_vapi_webhook,
+)
+from modules.voice_calls import voice_metrics
 from modules.waitlist import DB_PATH as WAITLIST_DB_PATH
 from validate_csv import validate_file
 
@@ -711,6 +718,77 @@ def send_bulk_clients_api():
         except Exception as exc:
             failed.append({"client_id": str(client_id), "error": str(exc)})
     return jsonify({"sent": len(sent), "failed": len(failed), "results": sent, "errors": failed})
+
+
+@app.get("/api/voice/config")
+def voice_config_api():
+    """Return current Vapi configuration status."""
+    return jsonify(config_status())
+
+
+@app.get("/api/voice/metrics")
+def voice_metrics_api():
+    """Return the 5 metric cards for voice recovery."""
+    return jsonify(voice_metrics())
+
+
+@app.post("/api/voice/start-call")
+def voice_start_call_api():
+    """Open a call_log row and return the config to dial via Vapi SDK."""
+    payload = request.get_json(silent=True) or {}
+    case_id = payload.get("case_id")
+    if not case_id:
+        return jsonify({"error": "case_id is required"}), 400
+    # Deliberately no email is sent here. Attribution compares the newest
+    # call_log.placed_at against the newest email-send timestamp and awards the
+    # recovery to whichever came last; sending an email in the same instant as
+    # the call would make that comparison a coin flip. Email sends stay on the
+    # explicit /api/clients/<id>/send-email path.
+    try:
+        result = start_web_call(
+            case_id,
+            client_name=payload.get("client_name", ""),
+            amount=payload.get("amount"),
+            condition=payload.get("condition", ""),
+            phone=payload.get("phone", ""),
+            case_key=payload.get("case_key", ""),
+        )
+    except Exception as exc:
+        return jsonify({"error": str(exc)}), 400
+    return jsonify(result)
+
+
+@app.post("/api/voice/complete-call")
+def voice_complete_call_api():
+    """Close a web call and run classification."""
+    payload = request.get_json(silent=True) or {}
+    call_id = payload.get("call_id")
+    if not call_id:
+        return jsonify({"error": "call_id is required"}), 400
+    try:
+        result = complete_web_call(
+            int(call_id),
+            transcript=payload.get("transcript", ""),
+            speech_detected=payload.get("speech_detected"),
+            seconds_to_first_speech=payload.get("seconds_to_first_speech"),
+            provider_call_id=payload.get("provider_call_id", ""),
+            ended_reason=payload.get("ended_reason", ""),
+        )
+    except Exception as exc:
+        return jsonify({"error": str(exc)}), 400
+    return jsonify(result)
+
+
+@app.post("/webhooks/vapi")
+def vapi_webhook():
+    """Receive Vapi end-of-call reports at a deployable HTTP boundary.
+
+    This is the server-push half of the closing path: whichever of this route
+    and ``/api/voice/complete-call`` arrives first closes the ``call_log`` row,
+    and the other is a no-op because ``close_call`` guards on ``ended_at = ''``.
+    """
+    body, status = ingest_vapi_webhook(request.get_data(), request.headers)
+    return jsonify(body), status
 
 
 def ensure_port_available(host: str, port: int) -> None:

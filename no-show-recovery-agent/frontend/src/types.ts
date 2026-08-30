@@ -245,3 +245,54 @@ export const isCondition = (value: unknown): value is Condition =>
 
 export const conditionLabel = (value: string): string =>
     isCondition(value) ? CONDITION_META[value].label : value.replace(/_/g, " ").replace(/\b\w/g, (character) => character.toUpperCase());
+
+export interface VoiceConfig {
+    mode: "web" | "demo";
+    web_ready: boolean;
+    phone_ready: boolean;
+    demo_mode_forced: boolean;
+    has_public_key: boolean;
+    has_private_key: boolean;
+    has_assistant: boolean;
+    has_webhook_secret: boolean;
+    silence_window_seconds: number;
+}
+
+export interface VoiceMetrics {
+    cycle_start: string | null;
+    recovered_via_voice: number;
+    voice_recovery_count: number;
+    recovered_via_email: number;
+    email_recovery_count: number;
+    total_recovered: number;
+    promises_captured: number;
+    promises_with_date: number;
+    calls_placed: number;
+    calls_in_flight: number;
+    answer_rate: number | null;
+    calls_completed: number;
+    calls_answered: number;
+    avg_hours_to_payment: number | null;
+    avg_sample_size: number;
+    outcome_counts: Record<string, number>;
+}
+
+export interface StartCallResult {
+    call: Record<string, unknown>;
+    mode: "web" | "demo";
+    web?: {
+        public_key: string;
+        assistant?: Record<string, unknown>;
+        assistantId?: string;
+        metadata?: Record<string, unknown>;
+        silence_window_seconds: number;
+    } | null;
+}
+
+export interface CompleteCallResult {
+    handled: boolean;
+    reason?: string;
+    duplicate?: boolean;
+    call?: Record<string, unknown>;
+    classification?: Record<string, unknown>;
+}

@@ -1,5 +1,5 @@
 /** Typed client for the Flask recovery API. */
-import type { AutopsyContext, AutopsyResponse, BulkSendResult, Client, DashboardFilters } from "./types";
+import type { AutopsyContext, AutopsyResponse, BulkSendResult, Client, DashboardFilters, VoiceConfig, VoiceMetrics, StartCallResult, CompleteCallResult } from "./types";
 
 /** Flask injects this into the served document so mutations can be CSRF-checked. */
 const csrfToken = (): string =>
@@ -113,3 +113,8 @@ export const sendBulkEmails = (clientIds: string[]): Promise<BulkSendResult> =>
         method: "POST",
         body: JSON.stringify({ client_ids: clientIds }),
     });
+
+export const fetchVoiceConfig = (): Promise<VoiceConfig> => request<VoiceConfig>("/api/voice/config");
+export const fetchVoiceMetrics = (): Promise<VoiceMetrics> => request<VoiceMetrics>("/api/voice/metrics");
+export const startVoiceCall = (payload: { case_id: string; client_name: string; amount?: number; condition: string; phone: string; case_key: string }): Promise<StartCallResult> => request<StartCallResult>("/api/voice/start-call", { method: "POST", body: JSON.stringify(payload) });
+export const completeVoiceCall = (payload: { call_id: number; transcript: string; speech_detected?: boolean; seconds_to_first_speech?: number; provider_call_id: string; ended_reason: string }): Promise<CompleteCallResult> => request<CompleteCallResult>("/api/voice/complete-call", { method: "POST", body: JSON.stringify(payload) });

@@ -150,6 +150,24 @@ npm run check
 
 To manually verify the four action layouts in an inbox, generate each action message (`charge_fee`, `offer_waitlist`, `friendly_reminder`, and `retry_payment`) and pass it to `send_message()` with your own email. Live sends are intentionally not automated without credentials and an explicit recipient.
 
+## Voice recovery (Vapi)
+
+`modules/voice_calls.py` owns the `call_log` store in `data/voice_calls.sqlite3` and computes the five metric cards shown in the Voice Calling panel. `modules/vapi_client.py` is the only boundary that talks to Vapi.
+
+Call flow: laptop browser → Vapi web call → AI agent → backend. The operator presses Start Call in the panel, `POST /api/voice/start-call` opens a `call_log` row *before* dialling and returns the public key plus assistant to the `@vapi-ai/web` SDK, and the terminal facts arrive back through either `POST /api/voice/complete-call` (browser-reported) or `POST /webhooks/vapi` (Vapi server-push). Whichever lands first closes the row; the other is a no-op because `close_call` guards on `ended_at = ''`.
+
+Configuration lives in `.env` (see `.env.example` for where each value comes from in the Vapi dashboard). Only `VAPI_PUBLIC_KEY` is required — it is a public credential by design and is the sole value sent to the browser. `VAPI_PRIVATE_KEY` and `VAPI_PHONE_NUMBER_ID` are needed only for outbound telephony and never leave the server. `VAPI_ASSISTANT_ID`, `VAPI_VOICE_ID`, and `VAPI_WEBHOOK_SECRET` are optional; with no public key at all, or with `VOICE_DEMO_MODE=true`, the system runs Demo Mode locally with no Vapi account. Point the Vapi dashboard webhook at `https://<your-host>/webhooks/vapi` and set the shared secret to the same value as `VAPI_WEBHOOK_SECRET`; when that variable is unset, webhook deliveries are rejected rather than trusted.
+
+Metric definitions. Every card is a live query over rows — no counters are stored. Four of the five cards are scoped to the current recovery cycle, whose start is the oldest audit-log timestamp (`start_of_current_cycle`); "₹ recovered via voice" is scoped by recovery, not by cycle. Outcomes are a closed four-way enum: `promised_to_pay`, `declined`, `no_answer`, `escalated`. "Answered" is never an outcome — it is an intermediate yes/no fact that decides *whether* a reply gets classified. Calls still in flight (no `outcome` yet) are counted by "Calls placed" and excluded from both sides of the answer rate. Average time to payment renders an em dash, not zero, until the first voice-attributed recovery exists.
+
+Attribution rule, stated once. At the moment a Razorpay payment webhook confirms a recovery, `attribute_recovery()` compares the newest `call_log.placed_at` for that case against the newest confirmed email-send timestamp for the same case. Whichever action happened *last* wins, and both `recovered_via` and `recovery_triggered_at` (the winning action's timestamp) are written in the same single-statement insert as `recovered_amount` and `recovered_at`, so a partially attributed recovery is unreachable. Average time to payment is then `recovered_at - recovery_triggered_at` on one row, with no join to `call_log` and therefore no ambiguity when a case has several call attempts. Because of this rule, `POST /api/voice/start-call` deliberately sends no email: an email stamped in the same instant as the call would make the comparison a coin flip.
+
+₹ recovered via voice is a **subset** of the dashboard's overall "Revenue recovered", not an addition to it. Each recovery is attributed to exactly one channel, so voice and email figures partition the total rather than stacking on top of it.
+
+Demo Mode applies the same two-step outcome rule as a real call, and both paths run through the same function (`complete_demo_call` is `complete_web_call`). Step one: silence longer than the five-second window, or a provider `endedReason` in `UNANSWERED_REASONS`, means unanswered and the outcome is `no_answer`. Step two: only if answered, the captured speech goes through the same four-way classification (Groq → Gemini → deterministic heuristic), which can never return `no_answer` and escalates anything it cannot read rather than inventing a promise.
+
+The `primary_channel` field from earlier drafts of the schema is intentionally absent from the implementation: none of the five cards need it, and `recovered_via` already carries the only channel fact that is queried.
+
 ## External integrations and degradation behavior
 
 Live mode intentionally fails closed rather than silently substituting fake external effects:
