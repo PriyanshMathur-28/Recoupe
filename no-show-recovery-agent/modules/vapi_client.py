@@ -36,6 +36,13 @@ the identical two steps:
     step 2  the captured speech goes through the SAME typed-JSON 4-way
             classification, which may only return an ANSWERED outcome.
 
+Step 1 is answered by evidence, and a transcript is the strongest evidence there
+is: if any speech was transcribed, the call was answered and the transcript
+decides the outcome. Timing signals — the browser's silence window, the
+provider's ``endedReason`` — only get to speak when there is no transcript at
+all. That ordering is what stops a slow connection or a chatty preamble from
+filing a real conversation as "nobody picked up".
+
 Whichever path arrives first wins; the other finds the row already closed and
 reports a duplicate. That is enforced by ``close_call``'s ``WHERE ended_at = ''``
 guard, not by ordering luck.
@@ -66,19 +73,26 @@ import hmac
 import json
 import os
 from pathlib import Path
-from typing import Any, Callable
+from typing import Any, Callable, Sequence
 
 from .audit_log import AUDIT_PATH
+from .flexible_plans import PLAN_DB_PATH
+from .plan_outreach import plan_invite_for_call
 from .voice_calls import (
     VOICE_DB_PATH,
+    VoiceOutcomeError,
+    agent_only_transcript,
     answered_from_ended_reason,
     attach_provider_call_id,
     close_call,
+    extract_final_answer,
     find_call_by_provider_id,
+    follow_up_email_for_call,
     get_call,
     open_call,
     record_call_audit,
     resolve_call_outcome,
+    validate_outcome,
 )
 
 VAPI_API_BASE = "https://api.vapi.ai"
@@ -88,34 +102,243 @@ VAPI_API_BASE = "https://api.vapi.ai"
 SECRET_HEADER = "X-Vapi-Secret"
 SIGNATURE_HEADER = "X-Vapi-Signature"
 
+# The tool the published assistant calls at the end of its call structure to
+# report what it heard. Handling it is not optional: an assistant configured with
+# a tool the server ignores waits for a result that never arrives.
+TOOL_OUTCOME_NAME = "logRecoveryOutcome"
+
 # The silence window that decides step 1. If no speech was captured within this
 # many seconds of the call connecting, nobody engaged. This is the *only* thing
 # the window decides — it never touches what the speech meant.
 SILENCE_WINDOW_SECONDS = 5.0
 
+# The hard ceiling on one call, enforced by the provider. A recovery call asks one
+# question; anything past this is a call that failed to end itself.
+MAX_CALL_SECONDS = 90
+
+# How long Vapi waits on dead air before hanging up on its own. 10s is the
+# provider minimum, and it is deliberately the floor: an abandoned call should
+# close itself rather than sit open to the duration cap.
+SILENCE_TIMEOUT_SECONDS = 10
+
 DEFAULT_FIRST_MESSAGE = (
-    "Hello, this is the accounts team calling about an outstanding balance from your "
-    "recent appointment. Is now an alright time to talk about it?"
+    "this is the accounts team about your outstanding balance. Is now a good time?"
 )
 
+# The last thing said on every call, spoken by the agent immediately before Vapi
+# hangs up. It exists so the final utterance is never the client's: without it,
+# ``endCallFunctionEnabled`` cuts the line the moment the tool fires and the
+# transcript ends mid-conversation on "Client: ...".
+#
+# It is bilingual because the assistant answers in whichever language the client
+# speaks, and every hang-up guarantee below keys on this text. An English-only
+# closing line meant a Hindi call had no phrase any of the three guarantees could
+# match, so the line simply stayed open until the duration cap cut it mid-word.
+END_CALL_MESSAGE = "Thank you for your time. धन्यवाद, आपका दिन शुभ हो. Goodbye."
+
+# Spoken triggers. ``endCallFunctionEnabled`` lets the model *choose* to hang up,
+# but a model that says goodbye and then waits is the "auto end not there"
+# symptom. These phrases end the call on the agent's own words, so a farewell is
+# always terminal.
+#
+# The prompt is written to close on one of these every time, and the browser
+# watches for the same list as a third guarantee (see ``useVapiCall``): provider
+# phrase matching, the end-call function, and a client-side hang-up all aim at
+# the same instant, so no single one of them failing leaves the line open.
+#
+# The Hindi entries are not a translation courtesy — they are load-bearing. All
+# three guarantees are substring matches against what the agent actually said,
+# so a farewell spoken in Devanagari matched nothing and ended nothing.
+#
+# Every entry must be terminal in isolation. Substring matching cannot tell a
+# closing "नमस्ते" from an opening one, and "नमस्ते" is how the agent is told to
+# greet a Hindi speaker — so listing it here ended the call on its own first
+# word. The greeting reached all three guarantees at once and the client was hung
+# up on before they ever spoke. See :data:`GREETING_PHRASES`.
+END_CALL_PHRASES = [
+    "goodbye",
+    "good bye",
+    "bye for now",
+    "thanks for your time",
+    "thank you for your time",
+    "have a good day",
+    "have a nice day",
+    "take care",
+    "will follow up",
+    "will be in touch",
+    # Hindi farewells, including the transliterations Deepgram returns when it
+    # romanises rather than emitting Devanagari. Only unambiguous closings: the
+    # full blessing "आपका दिन शुभ हो" is one, the bare "शुभ दिन" is also a
+    # greeting and therefore is not.
+    "धन्यवाद",
+    "आपका दिन शुभ हो",
+    "अलविदा",
+    "फिर मिलेंगे",
+    "dhanyavaad",
+    "dhanyawad",
+    "alvida",
+]
+
+# Openings, kept as an explicit blocklist rather than a comment.
+#
+# A greeting that reaches the farewell matching is not a small labelling error:
+# it hangs the call up on the agent's own first sentence, and the empty
+# conversation that results is then filed as a real answered call. The invariant
+# is asserted in the tests, so no future addition to the list above can quietly
+# reintroduce the failure, and the browser is handed this list to filter a
+# dashboard-authored ``endCallPhrases`` that may still contain one.
+GREETING_PHRASES = [
+    "नमस्ते",
+    "नमस्कार",
+    "शुभ दिन",
+    "namaste",
+    "namaskar",
+    "shubh din",
+    "hello",
+    "good morning",
+    "good afternoon",
+    "good evening",
+]
+
+
+def _contains_greeting(text: str) -> bool:
+    lowered = str(text or "").lower()
+    return any(greeting in lowered for greeting in GREETING_PHRASES)
+
+
+def terminal_phrases(phrases: Sequence[str] | None = None) -> list[str]:
+    """The farewell list with anything ambiguous removed, before it is published.
+
+    This is the only list that reaches the provider or the browser, so the
+    greeting blocklist is enforcement rather than documentation: a phrase added
+    to :data:`END_CALL_PHRASES` that doubles as an opening is dropped here
+    instead of ending a call on its own greeting.
+    """
+    candidates = END_CALL_PHRASES if phrases is None else phrases
+    return [str(phrase) for phrase in candidates if str(phrase or "").strip() and not _contains_greeting(phrase)]
+
+
+def is_farewell(line: str, phrases: Sequence[str] | None = None) -> bool:
+    """Is this spoken line the agent closing the call?
+
+    A line has to *contain* a farewell and *not* be an opening. Both halves are
+    needed: the phrase list decides what closing sounds like, and the greeting
+    blocklist stops a "नमस्ते" from qualifying no matter which list a dashboard
+    operator published. The browser applies the same two rules to the same two
+    lists, so the client-side guarantee cannot fire where this would not.
+    """
+    text = str(line or "").strip().lower()
+    if not text or _contains_greeting(text):
+        return False
+    return any(str(phrase or "").lower() in text for phrase in terminal_phrases(phrases))
+
+# Turn-taking, named once and applied to both assistant branches. The provider
+# defaults wait long enough after the client stops that the agent sounds like it
+# is thinking, and they refuse to yield when the client interrupts — together that
+# produced "Sorry, a few more seconds." A dashboard-authored assistant gets these
+# as overrides for the same reason.
+START_SPEAKING_PLAN = {
+    # Barely a pause. Smart endpointing already holds the floor mid-sentence, so
+    # this only governs how fast a *finished* sentence is answered.
+    "waitSeconds": 0.1,
+    "smartEndpointingEnabled": True,
+}
+
+STOP_SPEAKING_PLAN = {
+    # Yield the floor on the first real word, not after a whole phrase.
+    "numWords": 1,
+    "voiceSeconds": 0.1,
+    # Resume quickly after an interruption; the default leaves an awkward hole.
+    "backoffSeconds": 0.5,
+}
+
+# How long the browser waits after hearing the agent's farewell before hanging up
+# itself. It is a grace period, not a timeout: the provider's own end-call is
+# expected to land first and usually does. This only covers the case where the
+# model said goodbye without calling the function, which is the exact failure the
+# phrase list also guards.
+AGENT_FAREWELL_GRACE_SECONDS = 2.5
+
+# Written for speech, not for reading. Every rule here exists because of
+# something a real call got wrong: reciting internal case codes, saying "dollars"
+# for a rupee amount, and filling dead air with "just a few more seconds" while
+# the model was still thinking.
 ASSISTANT_SYSTEM_PROMPT = """You are a calm, courteous accounts-recovery voice agent for a small clinic.
 
 Your only job on this call is to find out whether the client intends to pay the
 outstanding balance, and if so, roughly when. You have no authority to change the
-amount, waive it, offer a discount, or agree to a payment plan.
+amount, waive it, offer a discount, or approve a payment plan. You may tell a
+client who asks for one that a link to discuss options will reach them by email;
+you may never agree to a schedule, an amount, or a date on this call.
+
+How you speak — speed is the priority:
+- One short sentence per turn. Never two. Under ten words wherever you can. This
+  is a phone call, not an email.
+- Reply the instant the client stops talking. Lead with the answer or the
+  question; no preamble, no "sure", no "of course", no "I understand", no
+  repeating back what the client just said.
+- Never say "one moment", "just a second", "a few more seconds", "let me check",
+  or anything else that asks the client to wait. You have every fact you need
+  already. If you are unsure, ask your one clarifying question instead.
+- Ask at most three questions in the whole call. The first is whether they can
+  pay; the second is when. There is rarely a third.
+- All money is Indian rupees. Say "rupees" and never "dollars"; never say a
+  currency symbol out loud.
+- Never read an internal case code, reference number or client ID aloud. They are
+  for your context only. Say "your pending payment" or "this account" instead.
+- Use the client's first name at most twice in the whole call.
+- Do not thank the client for every single thing they say. Acknowledge and move
+  the call forward.
 
 Rules you never break:
 - State the amount only if the client asks, and only the figure you were given.
 - Never threaten, never imply legal action, never raise your voice.
+- If the person says they are somebody else, ask once whether they can pass the
+  message to the client. If they cannot, apologise, say you will follow up later,
+  and end the call.
 - If the client is upset, disputes the charge, asks for a manager, mentions a
   lawyer, or says anything you are unsure how to handle: apologise briefly, say a
   member of the team will follow up personally, and end the call politely.
 - If the client agrees to pay, confirm the day out loud once, tell them a payment
-  link will arrive by email, thank them, and end the call.
-- If the client declines, thank them for their time and end the call. Do not
-  argue and do not ask a second time.
-- Keep the whole call under two minutes.
-"""
+  link will arrive by email, then end the call.
+- If the client says they cannot pay the full amount — they are short of money,
+  they ask to pay in instalments, or they offer part now and the rest later — stop
+  asking for the full amount immediately. Say once, in their language: "I
+  understand. I'll email you a secure link where you can choose a payment plan
+  that works for you." Then end the call. Do not name an amount, do not name a
+  date, do not accept or refuse what they proposed, and do not ask them to
+  confirm anything. Somebody else decides what is allowed; you only promise the
+  link.
+- Never offer a payment plan yourself. That option exists only after the client
+  has asked for one.
+- If the client declines, accept it the first time and end the call. Do not argue
+  and do not ask a second time.
+
+How you end the call — this is not optional:
+- You end the call, always. Never wait for the client to hang up, and never leave
+  the line open once the conversation is finished.
+- The moment you have an answer — a promise, a refusal, a wrong person, or an
+  escalation — stop asking questions and close.
+- Never end on a question. If you have just asked something and the call must
+  close — the time cap is near, the client has gone quiet, or you already have
+  what you need — drop the question and say the closing line instead. A call
+  that ends on your unanswered question is a call the client experiences as
+  being cut off.
+- Closing is two things in one turn, in this order: your last sentence, then the
+  end-call function. Saying a farewell without calling the function leaves the
+  client listening to silence, which is the single worst thing you can do here.
+- Your final sentence must be exactly: "%(closing)s"
+  Say it in full, every time, including the Hindi. Say nothing after it. Your
+  voice is the last thing on every call; the client's words must never be the
+  last thing said.
+- Thank the client before you hang up, always, even if they refused to pay, even
+  if they were rude, and even if the call is being cut short. Nobody is hung up
+  on without being thanked.
+- Never ask "is there anything else?" and never offer further help. There is
+  nothing else on this call.
+- Keep the whole call under %(seconds)d seconds. When you are close to that, close
+  the call properly rather than starting another exchange.
+""" % {"closing": END_CALL_MESSAGE, "seconds": MAX_CALL_SECONDS}
 
 
 class VapiConfigError(RuntimeError):
@@ -189,12 +412,49 @@ def config_status() -> dict[str, Any]:
 # ---------------------------------------------------------------------------
 
 
+def variable_values(
+    *,
+    case_id: str = "",
+    client_name: str = "",
+    amount: float | None = None,
+    last_activity: str = "",
+) -> dict[str, str]:
+    """Fill the ``{{mustache}}`` placeholders a dashboard assistant declares.
+
+    A published Vapi assistant keeps its prompt in the dashboard and parameterises
+    the case with template variables. Vapi substitutes them from
+    ``assistantOverrides.variableValues``, so every key here must be a plain
+    string: the provider does no formatting of its own, and a missing key is
+    rendered literally as ``{{clientName}}`` to whoever is on the call.
+
+    Every value is written to be *spoken*, because whatever lands here goes
+    straight through text-to-speech:
+
+    * ``amountDue`` carries its own currency word. A bare ``199`` next to a ``₹``
+      in the prompt was voiced as "one hundred ninety nine dollars"; the symbol
+      is not reliably pronounced, so the word is supplied instead and the prompt
+      must not add a symbol of its own.
+    * ``caseId`` stays exact because it identifies the case in the model's
+      context, and the prompt is responsible for never reading it aloud.
+
+    The names match the published assistant exactly.
+    """
+    return {
+        "clientName": str(client_name or "there").strip() or "there",
+        "caseId": str(case_id or "").strip(),
+        "amountDue": f"{float(amount):,.0f} rupees" if amount else "the amount on file",
+        "lastActivity": str(last_activity or "").strip() or "not recorded",
+    }
+
+
 def build_assistant(
     settings: dict[str, Any],
     *,
+    case_id: str = "",
     client_name: str = "",
     amount: float | None = None,
     condition: str = "",
+    last_activity: str = "",
 ) -> dict[str, Any]:
     """Return either an assistant reference or a full transient assistant.
 
@@ -203,21 +463,55 @@ def build_assistant(
     later builds an assistant there gets it used automatically, prompt and all.
 
     The shape returned is what both the web SDK and the REST API accept:
-    ``{"assistantId": ...}`` or ``{"assistant": {...}}``.
+    ``{"assistantId": ..., "assistantOverrides": {...}}`` or
+    ``{"assistant": {...}}``. The overrides ride along with the reference branch
+    because a dashboard-authored prompt is the one that needs its variables
+    filled; the inline prompt below already has the case baked into its text.
     """
     if settings["assistant_id"]:
-        return {"assistantId": settings["assistant_id"]}
+        return {
+            "assistantId": settings["assistant_id"],
+            "assistantOverrides": {
+                "variableValues": variable_values(
+                    case_id=case_id,
+                    client_name=client_name,
+                    amount=amount,
+                    last_activity=last_activity,
+                ),
+                # A dashboard-authored assistant has its own prompt, but hanging
+                # up is behaviour this project guarantees rather than delegates.
+                # Overriding these means an operator cannot accidentally publish
+                # an assistant that leaves the line open — or one that pauses long
+                # enough between turns to sound like it is thinking.
+                "endCallFunctionEnabled": True,
+                "endCallMessage": END_CALL_MESSAGE,
+                "endCallPhrases": terminal_phrases(),
+                "maxDurationSeconds": MAX_CALL_SECONDS,
+                "silenceTimeoutSeconds": SILENCE_TIMEOUT_SECONDS,
+                "startSpeakingPlan": dict(START_SPEAKING_PLAN),
+                "stopSpeakingPlan": dict(STOP_SPEAKING_PLAN),
+            },
+        }
     greeting_name = client_name or "there"
     amount_line = (
         f"The outstanding amount is {amount:.0f} rupees." if amount else "The outstanding amount is on file."
     )
     assistant: dict[str, Any] = {
         "name": "Recovery Agent",
-        "firstMessage": f"Hello {greeting_name}, {DEFAULT_FIRST_MESSAGE}",
+        # The greeting is one clause and starts with the name, because a long
+        # opening sentence is what the transcriber garbled into "Kai <name>".
+        "firstMessage": f"Hi {greeting_name}, {DEFAULT_FIRST_MESSAGE}",
         "model": {
             "provider": "openai",
             "model": "gpt-4o-mini",
-            "temperature": 0.3,
+            # Near-deterministic: this call has one job and no room for
+            # improvisation, and lower temperature also returns sooner.
+            "temperature": 0.2,
+            # A cap on the reply, enforced by the provider rather than by asking
+            # the model nicely. Long replies are the main source of dead air, and
+            # one short sentence never needs more than this. 40 tokens is roughly
+            # two spoken seconds — past that the model is padding.
+            "maxTokens": 40,
             "messages": [
                 {
                     "role": "system",
@@ -230,12 +524,25 @@ def build_assistant(
                 }
             ],
         },
-        "transcriber": {"provider": "deepgram", "model": "nova-2", "language": "en"},
+        # nova-3 handles Indian-English names and code-switching markedly better
+        # than nova-2, which is what mangled "Hi Aditya" and "Aditya" itself.
+        "transcriber": {"provider": "deepgram", "model": "nova-3", "language": "en"},
         "endCallFunctionEnabled": True,
-        "maxDurationSeconds": 180,
-        # Vapi hangs up on prolonged silence. Kept a multiple of our own window so
-        # a genuinely silent call ends on its own rather than running to the cap.
-        "silenceTimeoutSeconds": int(SILENCE_WINDOW_SECONDS * 4),
+        # The agent's own last words, spoken before the line drops. Paired with
+        # endCallPhrases this is what makes the hang-up automatic *and* keeps the
+        # final utterance on the agent's side.
+        "endCallMessage": END_CALL_MESSAGE,
+        "endCallPhrases": terminal_phrases(),
+        "maxDurationSeconds": MAX_CALL_SECONDS,
+        # Vapi hangs up on prolonged silence, at the provider floor, so an
+        # abandoned call closes itself instead of running to the duration cap.
+        "silenceTimeoutSeconds": SILENCE_TIMEOUT_SECONDS,
+        "startSpeakingPlan": dict(START_SPEAKING_PLAN),
+        "stopSpeakingPlan": dict(STOP_SPEAKING_PLAN),
+        # No ambience. The stall was cured by forbidding waiting phrases in the
+        # prompt and by the turn-taking plans above, so added noise would only
+        # give the transcriber something extra to mishear.
+        "backgroundSound": "off",
     }
     if settings["voice_id"]:
         assistant["voice"] = {"provider": "11labs", "voiceId": settings["voice_id"]}
@@ -255,6 +562,7 @@ def start_web_call(
     condition: str = "",
     phone: str = "",
     case_key: str = "",
+    last_activity: str = "",
     mode: str | None = None,
     voice_path: Path = VOICE_DB_PATH,
     audit_path: Path = AUDIT_PATH,
@@ -297,9 +605,92 @@ def start_web_call(
             # back to this row without depending on the browser reporting in.
             "metadata": {"call_log_id": call["id"], "case_id": str(case_id), "case_key": case_key or ""},
             "silence_window_seconds": SILENCE_WINDOW_SECONDS,
-            **build_assistant(settings, client_name=client_name, amount=amount, condition=condition),
+            # The browser needs the agent's closing line for two reasons: to speak
+            # it before an operator-initiated hang-up, and to guarantee the
+            # transcript it reports back ends on the agent's side.
+            "end_call_message": END_CALL_MESSAGE,
+            # The same farewell list the provider matches on. The browser watches
+            # the agent's own transcript for these and hangs up if the provider
+            # did not, so a model that says goodbye and then waits still ends the
+            # call. Server-owned so the two never disagree.
+            "end_call_phrases": terminal_phrases(),
+            # Openings that must never be read as a closing. Sent alongside the
+            # farewells because the browser matches substrings too: without this
+            # the agent's own "नमस्ते" hung the call up on its first sentence.
+            "greeting_phrases": list(GREETING_PHRASES),
+            # How long the browser waits after the agent's farewell before hanging
+            # up itself. Long enough for the provider's own end-call to land
+            # first, short enough that nobody sits listening to silence.
+            "end_call_grace_seconds": AGENT_FAREWELL_GRACE_SECONDS,
+            **build_assistant(
+                settings,
+                case_id=str(case_id),
+                client_name=client_name,
+                amount=amount,
+                condition=condition,
+                last_activity=last_activity,
+            ),
         },
     }
+
+
+def _outbound_email(
+    closed: dict[str, Any],
+    resolved: dict[str, Any],
+    *,
+    transcript: str,
+    audit_path: Path,
+    attempts_path: Path | None,
+    plan_path: Path,
+    auto_email: bool | None,
+    email_caller: Callable[[str], str] | None,
+    plan_caller: Callable[[str], str] | None,
+    payment_client: Any,
+    message_service: Any,
+) -> tuple[dict[str, Any], dict[str, Any]]:
+    """Decide the single email one finished call is allowed to send.
+
+    A call has two possible written consequences and they are mutually
+    exclusive. Either the client promised to pay and gets a link for the full
+    amount, or they said they cannot pay it and gets a link to propose a split.
+    Sending both would demand money from somebody who just explained they do
+    not have it, which is the behaviour this feature exists to remove — so the
+    plan request is decided first and wins.
+
+    ``auto_email`` gates both branches identically: the kill switch records what
+    was heard without emailing anything.
+    """
+    sending = bool(vapi_config()["auto_email"]) if auto_email is None else bool(auto_email)
+    plan = plan_invite_for_call(
+        closed,
+        resolved,
+        transcript=transcript,
+        audit_path=audit_path,
+        attempts_path=attempts_path,
+        plan_path=plan_path,
+        auto_email=sending,
+        plan_caller=plan_caller,
+        message_service=message_service,
+    )
+    if plan.get("requested"):
+        return plan, {
+            "should_send": False,
+            "sent": False,
+            "blocked_by": "flexible_plan_requested",
+            "reason": "The client asked to pay in parts, so they were sent the plan link instead of the full amount.",
+        }
+    email = follow_up_email_for_call(
+        closed,
+        resolved,
+        transcript=transcript,
+        audit_path=audit_path,
+        attempts_path=attempts_path,
+        auto_email=sending,
+        email_caller=email_caller,
+        payment_client=payment_client,
+        message_service=message_service,
+    )
+    return plan, email
 
 
 def complete_web_call(
@@ -312,18 +703,50 @@ def complete_web_call(
     ended_reason: str = "",
     voice_path: Path = VOICE_DB_PATH,
     audit_path: Path = AUDIT_PATH,
+    attempts_path: Path | None = None,
+    plan_path: Path = PLAN_DB_PATH,
     caller: Callable[[str], str] | None = None,
+    final_answer_caller: Callable[[str], str] | None = None,
+    email_caller: Callable[[str], str] | None = None,
+    plan_caller: Callable[[str], str] | None = None,
+    auto_email: bool | None = None,
+    payment_client: Any = None,
+    message_service: Any = None,
 ) -> dict[str, Any]:
-    """Close a web or demo call once the browser reports it ended.
+    """Close a browser web call once the browser reports it ended.
 
-    Step 1 is the silence window and nothing else: speech captured within
-    :data:`SILENCE_WINDOW_SECONDS` means answered, otherwise ``no_answer``. The
-    browser may pass ``speech_detected`` and ``seconds_to_first_speech`` as
-    observations, but the decision is made here so it cannot differ between the
-    browser path and the webhook path.
+    Step 1 decides *answered?* from evidence, strongest first:
 
-    Step 2 runs only for an answered call, and it is the same 4-way classifier a
+    1. A transcript containing at least one client turn is proof a conversation
+       happened. Nothing can overrule it — not the silence window, not a missing
+       ``speech_detected`` flag. This mirrors
+       :func:`~modules.voice_calls.answered_from_ended_reason`, which the webhook
+       path has always used, so the two paths agree.
+    2. A transcript on which only the agent spoke is not that proof. The agent
+       opens every call, so its greeting appears on calls nobody answered; a call
+       cut short during that greeting leaves two agent lines and no client. Such
+       a transcript falls through to the timing test rather than counting as a
+       conversation.
+    3. With nothing said by the client, the silence window decides: speech
+       observed within :data:`SILENCE_WINDOW_SECONDS` of the call *connecting* is
+       an answer, anything later or absent is ``no_answer``.
+
+    The window is deliberately powerless over a real two-sided transcript. It
+    measures browser-side timing, which carries WebRTC negotiation and model
+    latency, and a late first word is not the same fact as an empty call.
+    Treating it as one is what previously filed a full conversation as "Nobody
+    picked up."
+
+    Step 2 runs for every answered call, and it is the same 4-way classifier a
     webhook-closed call goes through.
+
+    Step 3 is the outbound email, and it happens here rather than in the caller
+    so the decision is always made against the very transcript that produced the
+    outcome. ``auto_email`` defaults to the configured
+    :envvar:`VOICE_AUTO_EMAIL` flag; passing it explicitly is how a test drives
+    the gate without touching the environment. Exactly one email can leave: a
+    captured flexible-plan request diverts the follow-up, because the whole
+    point of the request is that the full amount is not payable today.
     """
     call = get_call(int(call_id), voice_path)
     if call is None:
@@ -335,14 +758,20 @@ def complete_web_call(
     if provider_call_id and not call.get("provider_call_id"):
         attach_provider_call_id(call["id"], provider_call_id, voice_path)
 
-    spoke = bool(str(transcript or "").strip()) if speech_detected is None else bool(speech_detected)
-    in_window = seconds_to_first_speech is None or float(seconds_to_first_speech) <= SILENCE_WINDOW_SECONDS
-    answered = spoke and in_window
+    spoken_text = str(transcript or "").strip()
+    if spoken_text and not agent_only_transcript(spoken_text):
+        # Evidence beats timing — but only evidence of the *client* speaking.
+        answered = True
+    else:
+        observed = bool(speech_detected)
+        in_window = seconds_to_first_speech is None or float(seconds_to_first_speech) <= SILENCE_WINDOW_SECONDS
+        answered = observed and in_window
     resolved = resolve_call_outcome(
         answered=answered,
         transcript=transcript,
         ended_reason=ended_reason or ("" if answered else "silence-timed-out"),
         caller=caller,
+        final_answer_caller=final_answer_caller,
     )
     closed = close_call(
         call["id"],
@@ -351,15 +780,26 @@ def complete_web_call(
         promise_date=resolved.get("promise_date"),
         transcript_summary=resolved.get("summary") or "",
         ended_reason=ended_reason or ("" if answered else "silence-timed-out"),
+        final_answer=resolved.get("final_answer"),
         path=voice_path,
     )
     record_call_audit(closed, "voice_call_completed", resolved.get("summary") or "", resolved["outcome"], audit_path)
-    return {"handled": True, "call": closed, "classification": resolved}
+    plan, email = _outbound_email(
+        closed,
+        resolved,
+        transcript=transcript,
+        audit_path=audit_path,
+        attempts_path=attempts_path,
+        plan_path=plan_path,
+        auto_email=auto_email,
+        email_caller=email_caller,
+        plan_caller=plan_caller,
+        payment_client=payment_client,
+        message_service=message_service,
+    )
+    return {"handled": True, "call": closed, "classification": resolved, "email": email, "plan": plan}
 
 
-# Kept under its original name so demo-only callers read naturally. Demo and web
-# close through the same function because they close by the same rule.
-complete_demo_call = complete_web_call
 
 
 # ---------------------------------------------------------------------------
@@ -530,22 +970,215 @@ def _locate_call(message: dict[str, Any], voice_path: Path) -> dict[str, Any] | 
     return find_call_by_provider_id(provider_call_id, voice_path) if provider_call_id else None
 
 
+def _tool_invocations(message: dict[str, Any]) -> list[dict[str, Any]]:
+    """Flatten Vapi's two tool-call shapes into ``[{id, name, arguments}]``.
+
+    Current deliveries carry ``toolCallList`` with parsed ``arguments``; older
+    ones carry OpenAI-shaped ``toolCalls`` where the arguments are a JSON string.
+    Both are read so an assistant published against either shape still reports.
+    """
+    raw = message.get("toolCallList")
+    if not isinstance(raw, list):
+        raw = message.get("toolCalls") if isinstance(message.get("toolCalls"), list) else []
+    invocations: list[dict[str, Any]] = []
+    for item in raw:
+        if not isinstance(item, dict):
+            continue
+        function = item.get("function") if isinstance(item.get("function"), dict) else {}
+        arguments = item.get("arguments", function.get("arguments"))
+        if isinstance(arguments, str):
+            try:
+                arguments = json.loads(arguments or "{}")
+            except json.JSONDecodeError:
+                arguments = {}
+        invocations.append(
+            {
+                "id": str(item.get("id") or item.get("toolCallId") or ""),
+                "name": str(item.get("name") or function.get("name") or "").strip(),
+                "arguments": arguments if isinstance(arguments, dict) else {},
+            }
+        )
+    return invocations
+
+
+def _tool_results(invocations: list[dict[str, Any]], result: str) -> list[dict[str, Any]]:
+    """Answer every invocation so the assistant is never left waiting mid-call."""
+    return [{"toolCallId": item["id"], "result": result} for item in invocations]
+
+
+def _finalize(
+    call: dict[str, Any],
+    resolved: dict[str, Any],
+    *,
+    transcript: str,
+    ended_reason: str,
+    voice_path: Path,
+    audit_path: Path,
+    attempts_path: Path | None,
+    plan_path: Path,
+    auto_email: bool | None,
+    email_caller: Callable[[str], str] | None,
+    plan_caller: Callable[[str], str] | None,
+    payment_client: Any,
+    message_service: Any,
+) -> dict[str, Any]:
+    """Close one row and run every consequence of closing it, in order.
+
+    Shared by both server-push paths — the end-of-call report and the assistant's
+    own tool call — so neither can drift into closing a call without auditing it
+    or without honouring a promise it captured.
+
+    ``resolved["final_answer"]`` travels into the same write as the outcome. Both
+    server paths must carry it or the dashboard's final-answer column would be
+    blank for exactly the calls the operator did not close in the browser — a
+    closed tab or an outbound phone call.
+    """
+    closed = close_call(
+        call["id"],
+        outcome=resolved["outcome"],
+        answered=bool(resolved["answered"]),
+        promise_date=resolved.get("promise_date"),
+        transcript_summary=resolved.get("summary") or "",
+        ended_reason=ended_reason,
+        final_answer=resolved.get("final_answer"),
+        path=voice_path,
+    )
+    record_call_audit(closed, "voice_call_completed", resolved.get("summary") or "", resolved["outcome"], audit_path)
+    plan, email = _outbound_email(
+        closed,
+        resolved,
+        transcript=transcript,
+        audit_path=audit_path,
+        attempts_path=attempts_path,
+        plan_path=plan_path,
+        auto_email=auto_email,
+        email_caller=email_caller,
+        plan_caller=plan_caller,
+        payment_client=payment_client,
+        message_service=message_service,
+    )
+    return {"handled": True, "call": closed, "classification": resolved, "email": email, "plan": plan}
+
+
+def record_tool_outcome(
+    payload: dict[str, Any],
+    *,
+    voice_path: Path = VOICE_DB_PATH,
+    audit_path: Path = AUDIT_PATH,
+    attempts_path: Path | None = None,
+    plan_path: Path = PLAN_DB_PATH,
+    final_answer_caller: Callable[[str], str] | None = None,
+    email_caller: Callable[[str], str] | None = None,
+    plan_caller: Callable[[str], str] | None = None,
+    auto_email: bool | None = None,
+    payment_client: Any = None,
+    message_service: Any = None,
+) -> dict[str, Any]:
+    """Close a row from the assistant's own ``logRecoveryOutcome`` tool call.
+
+    This is a first-hand report from inside the conversation, so it is preferred
+    over classifying the transcript afterwards — but only when it satisfies the
+    same typed contract the classifier must satisfy. ``validate_outcome`` accepts
+    none of the four outcomes that would contradict the call having happened, so
+    a tool call can only ever record an ANSWERED result.
+
+    Anything that fails validation is acknowledged to the assistant and dropped,
+    leaving the ``end-of-call-report`` to close the row on the usual two-step
+    rule. Closing on a malformed report would be worse than closing late.
+    """
+    message = _message(payload)
+    invocations = [item for item in _tool_invocations(message) if item["name"] == TOOL_OUTCOME_NAME]
+    if not invocations:
+        return {"handled": False, "reason": f"no {TOOL_OUTCOME_NAME} tool call", "results": []}
+    # Acknowledged either way: the assistant is still on the call and a missing
+    # result stalls it mid-sentence, which is exactly the dead air we removed.
+    results = _tool_results(invocations, "recorded")
+
+    call = _locate_call(message, voice_path)
+    if call is None:
+        return {"handled": False, "reason": "no matching call_log row", "results": results}
+    if call.get("ended_at"):
+        return {"handled": False, "reason": "call already closed", "duplicate": True, "results": results}
+
+    try:
+        resolved = validate_outcome(invocations[-1]["arguments"])
+    except VoiceOutcomeError as exc:
+        return {"handled": False, "reason": f"unusable tool report: {exc}", "results": results}
+    # The report exists because a human talked to the agent, and the enum the
+    # tool is allowed to use cannot express anything else.
+    resolved["answered"] = True
+    resolved["source"] = "assistant-tool"
+    # The tool contract carries an outcome, not a final answer, so the client's
+    # closing position is still extracted from the transcript here. The assistant
+    # reporting "promised_to_pay" does not tell us whether the client said "right
+    # now" or "some other day", and the operator needs that difference.
+    transcript = _transcript(message)
+    resolved["final_answer"] = extract_final_answer(transcript, resolved, final_answer_caller)
+
+    outcome = _finalize(
+        call,
+        resolved,
+        transcript=transcript,
+        ended_reason="assistant-reported",
+        voice_path=voice_path,
+        audit_path=audit_path,
+        attempts_path=attempts_path,
+        plan_path=plan_path,
+        auto_email=auto_email,
+        email_caller=email_caller,
+        plan_caller=plan_caller,
+        payment_client=payment_client,
+        message_service=message_service,
+    )
+    return {**outcome, "results": results}
+
+
 def normalize_end_of_call(
     payload: dict[str, Any],
     *,
     voice_path: Path = VOICE_DB_PATH,
     audit_path: Path = AUDIT_PATH,
+    attempts_path: Path | None = None,
+    plan_path: Path = PLAN_DB_PATH,
     caller: Callable[[str], str] | None = None,
+    final_answer_caller: Callable[[str], str] | None = None,
+    email_caller: Callable[[str], str] | None = None,
+    plan_caller: Callable[[str], str] | None = None,
+    auto_email: bool | None = None,
+    payment_client: Any = None,
+    message_service: Any = None,
 ) -> dict[str, Any]:
     """Close the matching ``call_log`` row from an ``end-of-call-report`` event.
 
     Runs the same two-step rule as the browser path: ``endedReason`` decides step
-    1, and only an answered call reaches classification in step 2. Every other
-    Vapi event type is ignored, and a redelivered report for an already-closed
-    call is reported as a duplicate rather than raising.
+    1, and only an answered call reaches classification in step 2. A ``tool-calls``
+    delivery is handed to :func:`record_tool_outcome` instead, because the
+    assistant reporting its own result needs no inference. Every other Vapi event
+    type is ignored, and a redelivered report for an already-closed call is
+    reported as a duplicate rather than raising.
+
+    The follow-up email runs here too, on the same terms as the browser path. A
+    call that Vapi closed server-side — because the browser tab was shut, or
+    because the call was an outbound phone call — must still honour a promise it
+    captured. Whichever path closes the row first is the one that sends, because
+    the other returns early on ``ended_at``.
     """
     message = _message(payload)
     event_type = str(message.get("type") or "").strip()
+    if event_type == "tool-calls":
+        return record_tool_outcome(
+            payload,
+            voice_path=voice_path,
+            audit_path=audit_path,
+            attempts_path=attempts_path,
+            plan_path=plan_path,
+            final_answer_caller=final_answer_caller,
+            email_caller=email_caller,
+            plan_caller=plan_caller,
+            auto_email=auto_email,
+            payment_client=payment_client,
+            message_service=message_service,
+        )
     if event_type and event_type not in {"end-of-call-report", "status-update", "hang"}:
         return {"handled": False, "reason": f"ignored event '{event_type}'"}
     if event_type == "status-update" and str(message.get("status") or "").lower() != "ended":
@@ -560,19 +1193,29 @@ def normalize_end_of_call(
     ended_reason = str(message.get("endedReason") or message.get("endedReasonDetail") or "").strip()
     transcript = _transcript(message)
     answered = answered_from_ended_reason(ended_reason, transcript)
-    resolved = resolve_call_outcome(answered=answered, transcript=transcript, ended_reason=ended_reason, caller=caller)
-
-    closed = close_call(
-        call["id"],
-        outcome=resolved["outcome"],
-        answered=bool(resolved["answered"]),
-        promise_date=resolved.get("promise_date"),
-        transcript_summary=resolved.get("summary") or "",
+    resolved = resolve_call_outcome(
+        answered=answered,
+        transcript=transcript,
         ended_reason=ended_reason,
-        path=voice_path,
+        caller=caller,
+        final_answer_caller=final_answer_caller,
     )
-    record_call_audit(closed, "voice_call_completed", resolved.get("summary") or "", resolved["outcome"], audit_path)
-    return {"handled": True, "call": closed, "classification": resolved}
+
+    return _finalize(
+        call,
+        resolved,
+        transcript=transcript,
+        ended_reason=ended_reason,
+        voice_path=voice_path,
+        audit_path=audit_path,
+        attempts_path=attempts_path,
+        plan_path=plan_path,
+        auto_email=auto_email,
+        email_caller=email_caller,
+        plan_caller=plan_caller,
+        payment_client=payment_client,
+        message_service=message_service,
+    )
 
 
 def ingest_webhook(

@@ -14,6 +14,7 @@ import csv
 import json
 import math
 import os
+import re
 import sqlite3
 import uuid
 from collections import defaultdict
@@ -45,6 +46,7 @@ Every message includes a CURRENT AUTHORIZED DATA CONTEXT block: a JSON object wi
 - metrics: pre-aggregated figures you can use directly — csv_record_count, dashboard_client_count, value_at_risk, recovered_value, resolved_clients, unresolved_records, emailed_count, not_emailed_count, failure_reasons (list of {reason, count, amount}), case_types (list of {type, count, amount}), conditions (list of {condition, count, amount})
 - csv_records: raw rows from uploaded CSV exports — schema varies by file, but commonly includes subscription_amount, appointment_value, fee_amount, invoice_amount, payment_status, outcome, invoice_status, failure_reason, case_type, event_type, attempt_count, client_id, client_name, last_charge_date, and other columns
 - dashboard_records: one row per dashboard client — client_id, client_name, client_email, condition, payment_status, outcome, email_sent (bool), last_email_sent_at, amount, case (nested raw case object), audit_trail (list of past actions/events for that client)
+- evidence_scope: how complete the record lists are for THIS request. When complete is false, csv_records/dashboard_records hold only the highest-amount subset that fit the request: metrics still covers every record and remains authoritative for totals, counts and breakdowns, but you must not state or imply the listed rows are the complete set, and if the question needs an omitted row you say plainly that the record list was trimmed.
 
 This data — and nothing else — is the only source of truth for any business, financial, or client-status claim you make. You have no access to any other system, and no memory beyond the conversation history included in this request.
 
@@ -111,6 +113,130 @@ def _amount(record: dict[str, Any]) -> float:
 def _resolved(record: dict[str, Any]) -> bool:
     values = {str(record.get(key) or "").lower() for key in ("payment_status", "outcome", "invoice_status")}
     return bool(values & {"paid", "recovered", "resolved"})
+
+
+# ─── Provider capacity ──────────────────────────────────────────────────────
+# Prompt ceilings in characters for the WHOLE request — system prompt, history
+# and evidence together, not the evidence alone.
+#
+# Groq's on-demand tier caps tokens-per-minute far below any model's own
+# context window, so a full-size autopsy packet is refused outright with
+# HTTP 413 ``rate_limit_exceeded`` ("Limit 8000, Requested 35854") no matter
+# which model is selected. At roughly four characters per token, 8,000 TPM
+# leaves about 24,000 prompt characters once room is reserved for the answer.
+# Gemini's ceiling is a request-size concern rather than a rate limit.
+PROVIDER_PROMPT_CHARS = {"Groq": 24000, "Gemini": 600000}
+
+# Model ids verified against ListModels for the configured key. The alias is
+# used only when the pinned id is not visible to whichever key is in play.
+GEMINI_ANALYST_MODEL = "gemini-3.6-flash"
+GEMINI_ANALYST_FALLBACK = "gemini-flash-latest"
+
+# How many raw records to keep while shrinking a packet to fit a ceiling.
+RECORD_STEPS = (400, 200, 100, 50, 25, 10, 0)
+AUDIT_TRAIL_KEEP = 3
+HISTORY_TURNS = 12
+
+
+def _redact(text: Any, limit: int = 220) -> str:
+    """Collapse a provider error to one safe, short line.
+
+    Provider errors quote the request URL, and the Gemini endpoint carries the
+    API key in its query string, so an unredacted message would publish a live
+    credential onto the dashboard the moment a request failed.
+    """
+    cleaned = re.sub(r"(?i)\b(key|api[-_]?key|token|authorization)=[^&\s\"']+", r"\1=REDACTED", str(text or ""))
+    cleaned = " ".join(cleaned.split())
+    return cleaned[:limit] + ("…" if len(cleaned) > limit else "")
+
+
+def _prompt_budget(name: str) -> int:
+    """Prompt-character ceiling for one provider, overridable per deployment."""
+    try:
+        override = int(str(os.getenv(f"{name.upper()}_ANALYST_PROMPT_CHARS") or "").strip())
+    except ValueError:
+        override = 0
+    return override if override > 0 else PROVIDER_PROMPT_CHARS.get(name, 24000)
+
+
+def _scope(csv_included: int, csv_total: int, dash_included: int, dash_total: int) -> dict[str, Any]:
+    """State how complete the record lists are for one request.
+
+    Carried inside the evidence itself so the analyst can never mistake a
+    trimmed subset for the whole file and quietly understate the book.
+    """
+    complete = csv_included >= csv_total and dash_included >= dash_total
+    return {
+        "complete": complete,
+        "csv_records_included": csv_included, "csv_records_total": csv_total,
+        "dashboard_records_included": dash_included, "dashboard_records_total": dash_total,
+        "note": "Record lists hold every row for this request." if complete else (
+            f"Record lists were trimmed to the highest-amount rows to fit this request, and each dashboard row "
+            f"keeps only its {AUDIT_TRAIL_KEEP} most recent audit entries. metrics still covers ALL records and is "
+            f"authoritative for totals, counts and breakdowns. Never state or imply the listed rows are the complete "
+            f"set; if the question needs an omitted row, say the record list was trimmed."
+        ),
+    }
+
+
+def _slim(record: dict[str, Any]) -> dict[str, Any]:
+    """Drop the unbounded part of a dashboard row: its full audit history."""
+    trail = record.get("audit_trail")
+    if not isinstance(trail, list) or len(trail) <= AUDIT_TRAIL_KEEP:
+        return record
+    return {**record, "audit_trail": trail[-AUDIT_TRAIL_KEEP:]}
+
+
+def _serialize(context: dict[str, Any]) -> str:
+    return json.dumps(context, ensure_ascii=False, default=str, separators=(",", ":"))
+
+
+def _messages(question: str, evidence: str, history: list[dict[str, str]]) -> list[dict[str, str]]:
+    return [
+        {"role": "system", "content": SYSTEM_PROMPT},
+        *history[-HISTORY_TURNS:],
+        {"role": "user", "content": f"CURRENT AUTHORIZED DATA CONTEXT:\n{evidence}\n\nUSER QUESTION:\n{question}"},
+    ]
+
+
+def _overhead(question: str, history: list[dict[str, str]]) -> int:
+    """Characters every request spends before any evidence is added."""
+    fixed = len(SYSTEM_PROMPT) + len(question) + 64
+    return fixed + sum(len(str(item.get("content") or "")) for item in history[-HISTORY_TURNS:])
+
+
+def fit_context(context: dict[str, Any], budget_chars: int, overhead_chars: int = 0) -> tuple[dict[str, Any], str]:
+    """Return the largest version of the evidence packet that fits a budget.
+
+    Pre-aggregated ``metrics`` are never trimmed — they are the authoritative
+    totals and cost almost nothing. The raw record lists are what grow without
+    bound as the operator's CSV grows, so they are shed progressively: first
+    each row's audit history, then the rows themselves, highest exposure kept
+    first. Every trimmed packet states what it omitted via ``evidence_scope``.
+
+    Returns the packet and its serialization. The serialization may still
+    exceed the budget when even metrics-only evidence does not fit, which the
+    caller treats as "this provider cannot serve this question".
+    """
+    room = max(budget_chars - overhead_chars, 0)
+    full = _serialize(context)
+    if len(full) <= room:
+        return context, full
+
+    csv_ranked = sorted(context.get("csv_records") or [], key=_amount, reverse=True)
+    dash_ranked = sorted(context.get("dashboard_records") or [], key=_amount, reverse=True)
+    trimmed, evidence = context, full
+    for keep in RECORD_STEPS:
+        csv_kept = csv_ranked[:keep]
+        dash_kept = [_slim(row) for row in dash_ranked[:keep]]
+        trimmed = {
+            **context, "csv_records": csv_kept, "dashboard_records": dash_kept,
+            "evidence_scope": _scope(len(csv_kept), len(csv_ranked), len(dash_kept), len(dash_ranked)),
+        }
+        evidence = _serialize(trimmed)
+        if len(evidence) <= room:
+            break
+    return trimmed, evidence
 
 
 def _canonical_csv_files(data_dir: Path) -> list[Path]:
@@ -185,7 +311,11 @@ def build_context(clients: list[dict[str, Any]], filters: dict[str, Any] | None 
         "case_types": [{"type": key, **value} for key, value in sorted(types.items(), key=lambda item: (-item[1]["amount"], item[0]))],
         "conditions": [{"condition": key, **value} for key, value in sorted(conditions.items(), key=lambda item: (-item[1]["amount"], item[0]))],
     }
-    return {"generated_at": datetime.now(timezone.utc).isoformat(), "sources": sources, "filters": filters or {}, "metrics": metrics, "csv_records": csv_records, "dashboard_records": dashboard_records}
+    return {
+        "generated_at": datetime.now(timezone.utc).isoformat(), "sources": sources, "filters": filters or {},
+        "evidence_scope": _scope(len(csv_records), len(csv_records), len(dashboard_records), len(dashboard_records)),
+        "metrics": metrics, "csv_records": csv_records, "dashboard_records": dashboard_records,
+    }
 
 
 def _init_db(path: Path) -> None:
@@ -212,12 +342,17 @@ def _inr(value: float) -> str:
     return f"₹{value:,.0f}"
 
 
-def deterministic_answer(question: str, context: dict[str, Any], history: list[dict[str, str]]) -> tuple[str, list[str]]:
+def deterministic_answer(question: str, context: dict[str, Any], history: list[dict[str, str]], reason: str = "") -> tuple[str, list[str]]:
     """Used only when no LLM analyst could be reached at all. This is intentionally
     not question-aware — no keyword or condition matching — because interpreting
     the question is the LLM's job, driven entirely by SYSTEM_PROMPT. This just
     surfaces the grounded data snapshot so the caller still gets something truthful
     while the AI analyst is unavailable.
+
+    ``reason`` carries the redacted provider failure through to the operator.
+    Without it the dashboard shows an unexplained snapshot and the actual cause
+    — a rejected model id, an exhausted rate limit, an invalid key — is visible
+    nowhere in the product.
     """
     metrics = context["metrics"]
     lines = [
@@ -233,62 +368,100 @@ def deterministic_answer(question: str, context: dict[str, Any], history: list[d
         top = metrics["failure_reasons"][0]
         lines.append(f"- Top failure reason: {top['reason'].replace('_', ' ')} — {top['count']} records, {_inr(top['amount'])}")
     lines.append("")
-    if os.getenv("GROQ_API_KEY") or os.getenv("GEMINI_API_KEY"):
+    if reason:
+        lines.append(f"Reason the AI analyst could not answer: {reason}")
+    elif os.getenv("GROQ_API_KEY") or os.getenv("GEMINI_API_KEY"):
         lines.append("The configured AI providers could not complete this request. Check provider availability, model access, and API-key validity, then retry.")
     else:
         lines.append("Configure GROQ_API_KEY or GEMINI_API_KEY in the project .env file so the analyst can answer this specific question directly.")
     return ("\n".join(lines), [])
 
 
-def _call_grounded_llm(question: str, context: dict[str, Any], history: list[dict[str, str]]) -> str:
-    """Send the complete grounded packet to configured providers.
+def _groq_answer(messages: list[dict[str, str]]) -> str:
+    key = os.getenv("GROQ_API_KEY")
+    if not key:
+        raise RuntimeError("not configured")
+    response = requests.post(
+        "https://api.groq.com/openai/v1/chat/completions",
+        headers={"Authorization": f"Bearer {key}"},
+        json={"model": os.getenv("GROQ_ANALYST_MODEL", os.getenv("GROQ_MODEL", "llama-3.1-8b-instant")), "messages": messages, "temperature": 0.2},
+        timeout=45,
+    )
+    if response.status_code >= 400:
+        raise RuntimeError(f"HTTP {response.status_code} {_redact(response.text)}")
+    answer = str(response.json()["choices"][0]["message"]["content"]).strip()
+    if not answer:
+        raise RuntimeError("empty response")
+    return answer
 
-    Large evidence packets prefer Gemini because the configured Groq on-demand
-    tier rejects requests above 8,000 tokens per minute. Smaller prompts retain
-    Groq as the primary provider.
+
+def _gemini_answer(messages: list[dict[str, str]]) -> str:
+    """Ask Gemini, retrying once on a model the configured key cannot see.
+
+    A pinned model id is right for reproducibility but wrong when the key in a
+    given deployment has no access to it — that returns HTTP 404 and used to
+    kill the whole provider. The published alias is tried second so a key with
+    a different model catalogue still answers.
     """
-    load_dotenv(dotenv_path=ENV_PATH, override=False)
-    evidence = json.dumps(context, ensure_ascii=False, default=str, separators=(",", ":"))
-    messages = [{"role": "system", "content": SYSTEM_PROMPT}, *history[-12:], {"role": "user", "content": f"CURRENT AUTHORIZED DATA CONTEXT:\n{evidence}\n\nUSER QUESTION:\n{question}"}]
-    errors: list[str] = []
-
-    def call_groq() -> str:
-        groq_key = os.getenv("GROQ_API_KEY")
-        if not groq_key:
-            raise RuntimeError("not configured")
-        response = requests.post("https://api.groq.com/openai/v1/chat/completions", headers={"Authorization": f"Bearer {groq_key}"}, json={"model": os.getenv("GROQ_ANALYST_MODEL", os.getenv("GROQ_MODEL", "llama-3.1-8b-instant")), "messages": messages, "temperature": 0.2}, timeout=45)
-        response.raise_for_status()
-        answer = str(response.json()["choices"][0]["message"]["content"]).strip()
-        if not answer:
-            raise RuntimeError("empty response")
-        return answer
-
-    def call_gemini() -> str:
-        gemini_key = os.getenv("GEMINI_API_KEY")
-        if not gemini_key:
-            raise RuntimeError("not configured")
-        prompt = "\n\n".join(f"{item['role'].upper()}: {item['content']}" for item in messages)
-        model = os.getenv("GEMINI_ANALYST_MODEL", "gemini-3.6-flash")
-        response = requests.post(f"https://generativelanguage.googleapis.com/v1beta/models/{model}:generateContent?key={gemini_key}", json={"contents": [{"parts": [{"text": prompt}]}], "generationConfig": {"temperature": 0.2}}, timeout=60)
-        response.raise_for_status()
+    key = os.getenv("GEMINI_API_KEY")
+    if not key:
+        raise RuntimeError("not configured")
+    prompt = "\n\n".join(f"{item['role'].upper()}: {item['content']}" for item in messages)
+    body = {"contents": [{"parts": [{"text": prompt}]}], "generationConfig": {"temperature": 0.2}}
+    configured = str(os.getenv("GEMINI_ANALYST_MODEL") or "").strip() or GEMINI_ANALYST_MODEL
+    failures: list[str] = []
+    for model in list(dict.fromkeys([configured, GEMINI_ANALYST_FALLBACK])):
+        response = requests.post(
+            f"https://generativelanguage.googleapis.com/v1beta/models/{model}:generateContent?key={key}",
+            json=body, timeout=60,
+        )
+        if response.status_code == 404:
+            failures.append(f"{model}: model not available to this key")
+            continue
+        if response.status_code >= 400:
+            raise RuntimeError(f"{model}: HTTP {response.status_code} {_redact(response.text)}")
         answer = str(response.json()["candidates"][0]["content"]["parts"][0]["text"]).strip()
         if not answer:
-            raise RuntimeError("empty response")
+            raise RuntimeError(f"{model}: empty response")
         return answer
+    raise RuntimeError("; ".join(failures) or "no model available")
 
-    configured = []
-    if os.getenv("GROQ_API_KEY"):
-        configured.append(("Groq", call_groq))
-    if os.getenv("GEMINI_API_KEY"):
-        configured.append(("Gemini", call_gemini))
-    if len(evidence) > 28000:
-        configured.sort(key=lambda provider: provider[0] != "Gemini")
 
-    for name, provider in configured:
+def _call_grounded_llm(question: str, context: dict[str, Any], history: list[dict[str, str]]) -> str:
+    """Send the grounded packet to whichever configured provider can carry it.
+
+    Each provider has its own prompt ceiling, so each gets its own version of
+    the evidence, shrunk only as far as that ceiling requires. Providers that
+    can carry the evidence untrimmed are tried first, so a rate-limited tier is
+    never allowed to answer a question from a truncated book while a
+    larger-capacity provider sits unused behind it. Among providers that can
+    carry it all, the smallest sufficient ceiling wins, which keeps the fast
+    tier primary for ordinary questions. Among providers that must trim, the
+    largest ceiling wins, because it trims least. A provider too small even for
+    metrics-only evidence is skipped rather than sent a request that is certain
+    to be refused.
+    """
+    load_dotenv(dotenv_path=ENV_PATH, override=False)
+    overhead = _overhead(question, history)
+    callers: dict[str, Callable[[list[dict[str, str]]], str]] = {"Groq": _groq_answer, "Gemini": _gemini_answer}
+    errors: list[str] = []
+    candidates: list[tuple[int, int, str, str]] = []
+    for name in callers:
+        if not os.getenv(f"{name.upper()}_API_KEY"):
+            continue
+        budget = _prompt_budget(name)
+        packet, evidence = fit_context(context, budget, overhead)
+        if len(evidence) + overhead > budget:
+            errors.append(f"{name}: prompt ceiling of {budget} characters is too small for this request")
+            continue
+        complete = bool(packet.get("evidence_scope", {}).get("complete", True))
+        candidates.append((0 if complete else 1, budget if complete else -budget, name, evidence))
+
+    for _, _, name, evidence in sorted(candidates):
         try:
-            return provider()
+            return callers[name](_messages(question, evidence, history))
         except (requests.RequestException, KeyError, IndexError, TypeError, ValueError, RuntimeError) as exc:
-            errors.append(f"{name}: {exc}")
+            errors.append(f"{name}: {_redact(exc)}")
     if errors:
         raise RuntimeError("All configured analyst providers failed: " + " | ".join(errors))
     raise RuntimeError("No analyst LLM is configured")
@@ -305,15 +478,17 @@ def analyze(question: str, clients: list[dict[str, Any]], conversation_id: str |
     context = build_context(clients, filters)
     analyst = llm or _call_grounded_llm
     mode = "ai"
+    detail = ""
     try:
         answer = analyst(clean_question, context, history)
         if not answer:
             raise RuntimeError("Analyst returned an empty answer")
         all_records = context["csv_records"] + context["dashboard_records"]
         cited_ids = [str(row.get("client_id")) for row in all_records if str(row.get("client_id") or "") and str(row.get("client_id")) in answer]
-    except Exception:
-        answer, cited_ids = deterministic_answer(clean_question, context, history)
+    except Exception as exc:
+        detail = _redact(exc, 600) or exc.__class__.__name__
+        answer, cited_ids = deterministic_answer(clean_question, context, history, detail)
         mode = "grounded-fallback"
     _store(identifier, "user", clean_question, db_path)
     _store(identifier, "assistant", answer, db_path)
-    return {"conversation_id": identifier, "answer": answer, "mode": mode, "cited_client_ids": list(dict.fromkeys(cited_ids)), "context": {"generated_at": context["generated_at"], "sources": context["sources"], "csv_record_count": context["metrics"]["csv_record_count"], "dashboard_client_count": context["metrics"]["dashboard_client_count"], "filters": context["filters"]}}
+    return {"conversation_id": identifier, "answer": answer, "mode": mode, "detail": detail, "cited_client_ids": list(dict.fromkeys(cited_ids)), "context": {"generated_at": context["generated_at"], "sources": context["sources"], "csv_record_count": context["metrics"]["csv_record_count"], "dashboard_client_count": context["metrics"]["dashboard_client_count"], "filters": context["filters"]}}

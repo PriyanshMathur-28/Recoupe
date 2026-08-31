@@ -160,6 +160,53 @@
     border-bottom: 0;
 }
 
+/* An expanded last client is no longer the table's last row, so the dropdown
+   inherits the job of closing off the table body. */
+.historyRow:last-child td {
+    border-bottom: 0;
+}
+
+/* While open, the client row and its dropdown read as one block. */
+.rowExpanded td {
+    background: var(--surface-2);
+    border-bottom-color: transparent;
+}
+
+.rowExpanded:hover td {
+    background: var(--surface-2);
+}
+
+.rowExpanded::after {
+    opacity: 1;
+}
+
+/* ---- expander ------------------------------------------------------------ */
+
+.expander {
+    display: grid;
+    place-items: center;
+    width: 22px;
+    height: 22px;
+    flex: none;
+    padding: 0;
+    border: 1px solid transparent;
+    border-radius: 6px;
+    background: none;
+    color: var(--ink-3);
+    transition: transform var(--fast), color var(--fast), background var(--fast), border-color var(--fast);
+}
+
+.expander:hover {
+    color: var(--brand);
+    background: var(--brand-soft);
+    border-color: color-mix(in srgb, var(--brand) 22%, transparent);
+}
+
+.expanderOpen {
+    transform: rotate(90deg);
+    color: var(--brand);
+}
+
 /* ---- client cell -------------------------------------------------------- */
 
 .client {
@@ -246,6 +293,193 @@
     font-size: 12.5px;
     color: var(--ink-2);
     white-space: nowrap;
+}
+
+/* ---- call history dropdown ---------------------------------------------- */
+
+.historyRow td {
+    padding: 0 18px 14px 18px;
+    background: var(--surface-2);
+    border-bottom: 1px solid var(--line-2);
+}
+
+.history {
+    display: grid;
+    gap: 10px;
+    padding: 12px 14px;
+    border: 1px solid var(--line);
+    border-radius: var(--r-sm);
+    background: var(--surface);
+}
+
+.historyHead {
+    display: flex;
+    align-items: baseline;
+    justify-content: space-between;
+    gap: 12px;
+}
+
+.historyTitle {
+    font-size: 11px;
+    font-weight: 700;
+    text-transform: uppercase;
+    letter-spacing: .085em;
+    color: var(--ink-3);
+}
+
+.historyCount {
+    font-size: 11.5px;
+    color: var(--ink-3);
+}
+
+.historyNote {
+    display: flex;
+    align-items: center;
+    gap: 7px;
+    margin: 0;
+    font-size: 12.5px;
+    color: var(--ink-3);
+}
+
+.historyError {
+    color: var(--danger);
+}
+
+.historyRetry {
+    padding: 0;
+    border: 0;
+    background: none;
+    color: var(--brand);
+    font: inherit;
+    font-weight: 650;
+    text-decoration: underline;
+}
+
+.callList {
+    display: grid;
+    gap: 8px;
+    margin: 0;
+    padding: 0;
+    list-style: none;
+}
+
+.callItem {
+    display: flex;
+    align-items: flex-start;
+    gap: 12px;
+    padding: 9px 11px;
+    border: 1px solid var(--line-2);
+    border-radius: var(--r-sm);
+    background: var(--surface-2);
+}
+
+.callBody {
+    display: grid;
+    gap: 4px;
+    min-width: 0;
+    flex: 1;
+}
+
+.callMeta {
+    display: flex;
+    align-items: center;
+    flex-wrap: wrap;
+    gap: 8px;
+}
+
+.callTime {
+    display: inline-flex;
+    align-items: center;
+    gap: 4px;
+    font-size: 12px;
+    color: var(--ink-2);
+    white-space: nowrap;
+}
+
+.callTag {
+    padding: 2px 7px;
+    border-radius: 999px;
+    background: var(--surface-3);
+    border: 1px solid var(--line);
+    color: var(--ink-3);
+    font-size: 10.5px;
+    font-weight: 600;
+    white-space: nowrap;
+}
+
+.callSummary {
+    font-size: 12.5px;
+    color: var(--ink-2);
+    line-height: 1.45;
+}
+
+.callOutcome {
+    flex: none;
+    min-width: 108px;
+    padding: 3px 9px;
+    border-radius: 999px;
+    background: var(--surface-3);
+    border: 1px solid var(--line);
+    color: var(--ink-2);
+    font-size: 11px;
+    font-weight: 650;
+    text-align: center;
+    white-space: nowrap;
+}
+
+.outcomePromised {
+    background: var(--ok-soft);
+    border-color: color-mix(in srgb, var(--ok) 26%, transparent);
+    color: var(--ok);
+}
+
+.outcomeDeclined {
+    background: var(--danger-soft);
+    border-color: color-mix(in srgb, var(--danger) 26%, transparent);
+    color: var(--danger);
+}
+
+.outcomeNoAnswer {
+    background: var(--surface-3);
+    border-color: var(--line-strong);
+    color: var(--ink-3);
+}
+
+.outcomeEscalated {
+    background: var(--warn-soft);
+    border-color: color-mix(in srgb, var(--warn) 26%, transparent);
+    color: var(--warn);
+}
+
+.emailBadge {
+    display: inline-flex;
+    align-items: center;
+    gap: 5px;
+    flex: none;
+    padding: 3px 9px;
+    border-radius: 999px;
+    background: var(--surface-3);
+    border: 1px solid var(--line);
+    color: var(--ink-3);
+    font-size: 11px;
+    font-weight: 600;
+    white-space: nowrap;
+}
+
+.emailBadgeSent {
+    background: var(--ok-soft);
+    border-color: color-mix(in srgb, var(--ok) 26%, transparent);
+    color: var(--ok);
+}
+
+@media (max-width: 720px) {
+    .callItem {
+        flex-wrap: wrap;
+    }
+
+    .callOutcome {
+        min-width: 0;
+    }
 }
 
 /* ---- skeleton ----------------------------------------------------------- */

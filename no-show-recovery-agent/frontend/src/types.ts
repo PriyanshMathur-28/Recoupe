@@ -154,6 +154,8 @@ export interface AutopsyResponse {
     conversation_id: string;
     answer: string;
     mode: "ai" | "grounded-fallback";
+    /** Redacted provider failure behind a `grounded-fallback` answer; empty on success. */
+    detail?: string;
     cited_client_ids: string[];
     context: AutopsyContext;
 }
@@ -247,10 +249,10 @@ export const conditionLabel = (value: string): string =>
     isCondition(value) ? CONDITION_META[value].label : value.replace(/_/g, " ").replace(/\b\w/g, (character) => character.toUpperCase());
 
 export interface VoiceConfig {
-    mode: "web" | "demo";
+    mode: "web" | "unconfigured";
     web_ready: boolean;
     phone_ready: boolean;
-    demo_mode_forced: boolean;
+    auto_email: boolean;
     has_public_key: boolean;
     has_private_key: boolean;
     has_assistant: boolean;
@@ -277,16 +279,68 @@ export interface VoiceMetrics {
     outcome_counts: Record<string, number>;
 }
 
+/** Values Vapi substitutes into a published assistant's {{mustache}} variables. */
+export interface VoiceVariableValues {
+    clientName: string;
+    caseId: string;
+    amountDue: string;
+    lastActivity: string;
+}
+
 export interface StartCallResult {
     call: Record<string, unknown>;
-    mode: "web" | "demo";
+    mode: "web";
     web?: {
         public_key: string;
         assistant?: Record<string, unknown>;
         assistantId?: string;
+        assistantOverrides?: Record<string, unknown> & { variableValues: VoiceVariableValues };
         metadata?: Record<string, unknown>;
         silence_window_seconds: number;
+        /** The agent's closing line — spoken last, then the call ends. */
+        end_call_message?: string;
+        /**
+         * Farewell phrases the provider ends the call on. The browser watches the
+         * agent's transcript for the same list so a goodbye that the provider
+         * missed still hangs up.
+         */
+        end_call_phrases?: string[];
+        /**
+         * Openings that must never be read as a closing. Matching is by substring,
+         * so without this the agent's own "नमस्ते" ended the call on its greeting.
+         */
+        greeting_phrases?: string[];
+        /** Seconds the browser waits after a farewell before hanging up itself. */
+        end_call_grace_seconds?: number;
     } | null;
+}
+
+/** What the agent decided about the follow-up email, and what came of it. */
+export interface VoiceEmailDecision {
+    should_send: boolean;
+    sent: boolean;
+    reason: string;
+    blocked_by?: string;
+    short_url?: string;
+    error?: string;
+}
+
+/**
+ * What the client FINALLY settled on — a separate question from the 4-way
+ * outcome, extracted from the transcript by its own typed LLM call.
+ *
+ * `kind` is a closed enum server-side; it is typed loosely here because a new
+ * kind must not break the build of a UI that renders it as a label.
+ * `client_words` is a bounded quote of the client's own closing line, never the
+ * transcript.
+ */
+export interface VoiceFinalAnswer {
+    kind: string;
+    answer: string;
+    pay_date: string | null;
+    client_words: string;
+    confidence: number;
+    source: string;
 }
 
 export interface CompleteCallResult {
@@ -294,5 +348,47 @@ export interface CompleteCallResult {
     reason?: string;
     duplicate?: boolean;
     call?: Record<string, unknown>;
-    classification?: Record<string, unknown>;
+    classification?: Record<string, unknown> & { final_answer?: VoiceFinalAnswer | null };
+    email?: VoiceEmailDecision | null;
+}
+
+/**
+ * One row of `call_log`, as the per-client history endpoint returns it.
+ *
+ * `email_sent` is not a column on the call: it is resolved server-side from the
+ * audit trail, because the follow-up email is a separate audited action that
+ * happens after the call closes.
+ */
+export interface VoiceCallRecord {
+    id: number;
+    case_id: string;
+    case_key: string;
+    placed_at: string;
+    ended_at: string;
+    outcome: string;
+    promise_date: string;
+    transcript_summary: string;
+    provider: string;
+    provider_call_id: string;
+    mode: string;
+    client_name: string;
+    phone: string;
+    answered: number;
+    ended_reason: string;
+    /**
+     * The client's final answer, flattened onto the row. Empty strings — not
+     * nulls — because "" is the honest value for a call that ended before the
+     * client said anything, and the dashboard renders these straight into a cell.
+     */
+    final_answer_kind: string;
+    final_answer: string;
+    final_pay_date: string;
+    client_final_words: string;
+    email_sent: boolean;
+    email_sent_at: string;
+}
+
+export interface VoiceCallHistory {
+    case_id: string;
+    calls: VoiceCallRecord[];
 }

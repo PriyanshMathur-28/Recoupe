@@ -48,6 +48,9 @@ export function RevenueAutopsyChat({ filters, onOpenClient }: { filters: Dashboa
             const result = await sendRevenueQuestion({ message: clean, conversation_id: conversationId, filters });
             setConversationId(result.conversation_id);
             sessionStorage.setItem(conversationKey, result.conversation_id);
+            // A downgraded answer is still HTTP 200, so the composer is the only
+            // place the operator can learn WHY the analyst fell back to a snapshot.
+            if (result.mode !== "ai" && result.detail) setError(`Analyst unavailable — ${result.detail}`);
             setMessages((current) => [...current, { role: "assistant", content: result.answer, mode: result.mode, citedClientIds: result.cited_client_ids }]);
             setContext((current) => current ? { ...current, generated_at: result.context.generated_at, sources: result.context.sources, csv_record_count: result.context.csv_record_count, dashboard_client_count: result.context.dashboard_client_count } : result.context);
         } catch (caught) {

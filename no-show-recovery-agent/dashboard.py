@@ -25,7 +25,7 @@ from modules.vapi_client import (
     complete_web_call,
     ingest_webhook as ingest_vapi_webhook,
 )
-from modules.voice_calls import voice_metrics
+from modules.voice_calls import call_history, voice_metrics
 from modules.waitlist import DB_PATH as WAITLIST_DB_PATH
 from validate_csv import validate_file
 
@@ -732,6 +732,19 @@ def voice_metrics_api():
     return jsonify(voice_metrics())
 
 
+@app.get("/api/clients/<client_id>/calls")
+def client_call_history_api(client_id: str):
+    """Every call attempt for one client, newest first, with its email outcome.
+
+    Read-only and unauthenticated on the same terms as ``/api/clients``: it is
+    the same operator-facing data, scoped to one case. No transcript body is
+    returned — only the summary the classifier produced, plus the client's final
+    answer and the single bounded line they closed on — so the endpoint cannot
+    become a way to read a conversation verbatim out of the audit trail.
+    """
+    return jsonify({"case_id": str(client_id), "calls": call_history(str(client_id), audit_path=AUDIT_PATH)})
+
+
 @app.post("/api/voice/start-call")
 def voice_start_call_api():
     """Open a call_log row and return the config to dial via Vapi SDK."""
@@ -739,11 +752,9 @@ def voice_start_call_api():
     case_id = payload.get("case_id")
     if not case_id:
         return jsonify({"error": "case_id is required"}), 400
-    # Deliberately no email is sent here. Attribution compares the newest
-    # call_log.placed_at against the newest email-send timestamp and awards the
-    # recovery to whichever came last; sending an email in the same instant as
-    # the call would make that comparison a coin flip. Email sends stay on the
-    # explicit /api/clients/<id>/send-email path.
+    # Placing the call sends nothing. Any follow-up email is decided after the
+    # conversation has happened, inside /api/voice/complete-call, and only for a
+    # promise the agent actually captured.
     try:
         result = start_web_call(
             case_id,
@@ -752,6 +763,9 @@ def voice_start_call_api():
             condition=payload.get("condition", ""),
             phone=payload.get("phone", ""),
             case_key=payload.get("case_key", ""),
+            # Fills the published assistant's {{lastActivity}} variable so the
+            # agent can open with what the account last did.
+            last_activity=payload.get("last_activity", ""),
         )
     except Exception as exc:
         return jsonify({"error": str(exc)}), 400

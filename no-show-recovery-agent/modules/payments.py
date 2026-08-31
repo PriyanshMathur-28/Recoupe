@@ -40,8 +40,32 @@ def _amount_in_paise(amount: Any) -> int:
     return int(paise)
 
 
-def create_payment_link(amount: Any, name: str, description: str, contact: str, client: Any = None) -> dict[str, Any]:
-    """Create a Razorpay payment link; accept either a phone or an email contact."""
+def _clean_notes(notes: Any) -> dict[str, str]:
+    """Coerce caller notes to the flat string map Razorpay accepts.
+
+    Razorpay rejects non-string note values, so every value is stringified and
+    blanks are dropped. Notes are how a webhook later recognises which case and
+    which installment a payment belongs to, so this must never raise: a bad note
+    would otherwise block a link the customer is waiting for.
+    """
+    if not isinstance(notes, dict):
+        return {}
+    cleaned: dict[str, str] = {}
+    for key, value in notes.items():
+        name = str(key or "").strip()
+        text = str(value if value is not None else "").strip()
+        if name and text:
+            cleaned[name] = text[:512]
+    return cleaned
+
+
+def create_payment_link(amount: Any, name: str, description: str, contact: str, client: Any = None, notes: dict[str, Any] | None = None) -> dict[str, Any]:
+    """Create a Razorpay payment link; accept either a phone or an email contact.
+
+    ``notes`` is optional metadata echoed back on every webhook for the link. It
+    is the only way a later payment can be traced to the recovery case that
+    caused it, so callers that need attribution should always pass it.
+    """
     load_dotenv()
     normalized_contact = str(contact or "").strip()
     if not normalized_contact:
@@ -58,15 +82,18 @@ def create_payment_link(amount: Any, name: str, description: str, contact: str, 
         customer["email"] = normalized_contact
     else:
         customer["contact"] = normalized_contact
+    request: dict[str, Any] = {
+        "amount": amount_paise,
+        "currency": "INR",
+        "description": description,
+        "customer": customer,
+        "notify": {"sms": False, "email": False},
+        "reminder_enable": True,
+    }
+    if (link_notes := _clean_notes(notes)):
+        request["notes"] = link_notes
     try:
-        response = client.payment_link.create({
-            "amount": amount_paise,
-            "currency": "INR",
-            "description": description,
-            "customer": customer,
-            "notify": {"sms": False, "email": False},
-            "reminder_enable": True,
-        })
+        response = client.payment_link.create(request)
     except razorpay.errors.ServerError as exc:
         provider_message = str(exc).strip()
         if "test mode limit" in provider_message.lower() and "payment_link" in provider_message.lower():
