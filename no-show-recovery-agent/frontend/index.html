@@ -25,7 +25,15 @@
 </head>
 
 <body class="flex h-full overflow-hidden bg-background">
-    <div id="root"></div>
+    <!--
+        The mount point is sized explicitly rather than left to shrink-to-fit.
+        It is the only flex child of <body>, so without a width its own width is
+        resolved from its content, and a child asking for `w-full` inside it is
+        asking for a percentage of an indefinite length. The customer plan page
+        centres a fixed-width column inside a full-height column, and both of
+        those need a parent with real dimensions to centre within.
+    -->
+    <div id="root" class="h-full w-full min-w-0"></div>
     <script type="module" src="/src/main.tsx"></script>
 </body>
 

@@ -19,6 +19,7 @@ from modules.voice_calls import (
     VOICE_LINK_ACTION,
     VOICE_LINK_OUTCOME,
     VoiceOutcomeError,
+    accepted_plan_offer,
     agent_only_transcript,
     answered_from_ended_reason,
     attribute_recovery,
@@ -71,6 +72,15 @@ def _backdate(voice_path, call_id, stamp):
 def _promise_caller(date="2026-09-04"):
     def caller(_transcript):
         return json.dumps({"outcome": "promised_to_pay", "promise_date": date, "summary": "Client agreed to pay.", "confidence": 0.9})
+
+    return caller
+
+
+def _declined_caller(summary="Client cannot pay the full amount right now."):
+    """A stand-in for the outcome model on a call that captured no promise."""
+
+    def caller(_transcript):
+        return json.dumps({"outcome": "declined", "summary": summary, "confidence": 0.9})
 
     return caller
 
@@ -142,6 +152,7 @@ def paths(tmp_path):
         "audit": tmp_path / "logs" / "audit_log.csv",
         "recovery": tmp_path / "recovered.sqlite3",
         "attempts": tmp_path / "attempts.sqlite3",
+        "plans": tmp_path / "flexible_plans.sqlite3",
     }
 
 
@@ -749,6 +760,126 @@ def test_closing_a_call_returns_the_email_decision_to_the_browser(paths):
 
 
 # ---------------------------------------------------------------------------
+# Saying "yes" to the offered plan emails the plan, end to end
+# ---------------------------------------------------------------------------
+
+
+def test_a_yes_to_the_offered_plan_emails_the_plan_link(paths):
+    """The user's requested flow, driven through the real closing path.
+
+    The agent asks whether a customised plan is wanted, the client says only
+    "haan, bhej do", and that one word has to be enough to (a) count as the
+    request, (b) send the plan invite, and (c) stop the full-amount follow-up.
+    Nothing in the transcript mentions money or installments, so this fails the
+    moment ``accepted_plan_offer`` stops reading the agent's offer for context.
+    """
+    _sendable_case(paths)
+    call = open_call("C-1", mode="web", path=paths["voice"])
+    gmail = _Gmail()
+    result = vapi_client.complete_web_call(
+        call["id"],
+        transcript=(
+            "Agent: We can arrange a customised payment plan for you. "
+            "Shall I email you the link to set it up?\n"
+            "Client: हाँ, भेज दो."
+        ),
+        speech_detected=True,
+        seconds_to_first_speech=1.0,
+        voice_path=paths["voice"],
+        audit_path=paths["audit"],
+        attempts_path=paths["attempts"],
+        plan_path=paths["plans"],
+        caller=_declined_caller(),
+        auto_email=True,
+        # The follow-up model must never be reached: the plan diverts the send
+        # before any verdict on the full amount can be asked for.
+        email_caller=_never_called,
+        message_service=gmail,
+    )
+    assert result["plan"]["requested"] is True
+    assert result["plan"]["invited"] is True
+    assert result["email"]["sent"] is False
+    assert result["email"]["blocked_by"] == "flexible_plan_requested"
+    # One email left, and it was the plan invitation rather than a demand.
+    assert gmail.users().messages().body is not None
+
+
+def test_the_plan_request_is_audited_with_the_client_s_own_words(paths):
+    """The row explaining why the case stopped being chased must quote them."""
+    from modules.audit_log import read_events
+
+    _sendable_case(paths)
+    call = open_call("C-1", mode="web", path=paths["voice"])
+    vapi_client.complete_web_call(
+        call["id"],
+        transcript=(
+            "Agent: Namaste Aditya ji, Naina bol rahi hoon.\n"
+            "Client: अभी पैसे नहीं हैं\n"
+            "Agent: Main samajh sakti hoon.\n"
+            "Client: कोई और plan है आपके पास?"
+        ),
+        speech_detected=True,
+        seconds_to_first_speech=1.0,
+        voice_path=paths["voice"],
+        audit_path=paths["audit"],
+        attempts_path=paths["attempts"],
+        plan_path=paths["plans"],
+        caller=_declined_caller(),
+        auto_email=True,
+        email_caller=_never_called,
+        message_service=_Gmail(),
+    )
+    row = next(event for event in read_events(paths["audit"]) if event["outcome"] == "plan_requested")
+    assert row["actor"] == "voice_agent"
+
+
+def test_a_call_nobody_answered_is_never_sent_a_plan(paths):
+    _sendable_case(paths)
+    call = open_call("C-1", mode="web", path=paths["voice"])
+    result = vapi_client.complete_web_call(
+        call["id"],
+        transcript="",
+        speech_detected=False,
+        voice_path=paths["voice"],
+        audit_path=paths["audit"],
+        attempts_path=paths["attempts"],
+        plan_path=paths["plans"],
+        auto_email=True,
+        email_caller=_never_called,
+        plan_caller=_never_called,
+        message_service=_Gmail(),
+    )
+    assert result["call"]["outcome"] == "no_answer"
+    assert result["plan"]["requested"] is False
+    assert result["plan"]["invited"] is False
+
+
+def test_the_kill_switch_records_the_plan_request_without_emailing_it(paths):
+    """``VOICE_AUTO_EMAIL`` off must still capture *why* the call ended there."""
+    _sendable_case(paths)
+    call = open_call("C-1", mode="web", path=paths["voice"])
+    gmail = _Gmail()
+    result = vapi_client.complete_web_call(
+        call["id"],
+        transcript="Client: koi aur plan hai aapke paas?",
+        speech_detected=True,
+        seconds_to_first_speech=1.0,
+        voice_path=paths["voice"],
+        audit_path=paths["audit"],
+        attempts_path=paths["attempts"],
+        plan_path=paths["plans"],
+        caller=_declined_caller(),
+        auto_email=False,
+        email_caller=_never_called,
+        message_service=gmail,
+    )
+    assert result["plan"]["requested"] is True
+    assert result["plan"]["invited"] is False
+    assert result["plan"]["blocked_by"] == "auto_email_disabled"
+    assert gmail.users().messages().body is None
+
+
+# ---------------------------------------------------------------------------
 # The assistant reports its own outcome (logRecoveryOutcome)
 # ---------------------------------------------------------------------------
 
@@ -1153,11 +1284,12 @@ def test_the_closing_line_is_spoken_in_both_languages():
 
 def test_the_farewell_list_is_not_blind_in_hindi():
     phrases = vapi_client.END_CALL_PHRASES
-    assert "धन्यवाद" in phrases
+    assert "आपका दिन शुभ हो" in phrases
+    assert "अलविदा" in phrases
     # Transliterations matter separately: the transcriber may return Roman script
     # for Hindi speech, in which case the Devanagari entries never match.
-    assert "dhanyavaad" in phrases
     assert "alvida" in phrases
+    assert "aapka din shubh ho" in phrases
 
 
 def test_every_farewell_phrase_is_lowercased_for_matching():
@@ -1187,7 +1319,8 @@ def test_an_inline_assistant_cannot_be_built_without_the_hang_up_guarantees(monk
     assistant = vapi_client.build_assistant(vapi_client.vapi_config())["assistant"]
     assert assistant["endCallFunctionEnabled"] is True
     assert assistant["endCallMessage"] == vapi_client.END_CALL_MESSAGE
-    assert "धन्यवाद" in assistant["endCallPhrases"]
+    assert "अलविदा" in assistant["endCallPhrases"]
+    assert "धन्यवाद" not in assistant["endCallPhrases"]
 
 
 def test_a_dashboard_authored_assistant_has_the_same_guarantees_forced_on_it(monkeypatch):
@@ -1198,7 +1331,8 @@ def test_a_dashboard_authored_assistant_has_the_same_guarantees_forced_on_it(mon
     overrides = vapi_client.build_assistant(vapi_client.vapi_config())["assistantOverrides"]
     assert overrides["endCallFunctionEnabled"] is True
     assert overrides["endCallMessage"] == vapi_client.END_CALL_MESSAGE
-    assert "धन्यवाद" in overrides["endCallPhrases"]
+    assert "अलविदा" in overrides["endCallPhrases"]
+    assert "धन्यवाद" not in overrides["endCallPhrases"]
 
 
 def test_the_browser_is_handed_the_farewell_it_has_to_watch_for(paths, monkeypatch):
@@ -1208,7 +1342,7 @@ def test_the_browser_is_handed_the_farewell_it_has_to_watch_for(paths, monkeypat
     monkeypatch.delenv("VAPI_ASSISTANT_ID", raising=False)
     web = vapi_client.start_web_call("C-1", voice_path=paths["voice"], audit_path=paths["audit"])["web"]
     assert web["end_call_message"] == vapi_client.END_CALL_MESSAGE
-    assert web["end_call_phrases"] == list(vapi_client.END_CALL_PHRASES)
+    assert web["end_call_phrases"] == vapi_client.terminal_phrases()
     assert web["end_call_grace_seconds"] > 0
 
 
@@ -1231,6 +1365,80 @@ def test_the_agent_s_greeting_is_never_a_farewell():
 def test_a_real_closing_still_trips_the_watch():
     assert vapi_client.is_farewell("धन्यवाद, आपका दिन शुभ हो.") is True
     assert vapi_client.is_farewell("Thanks for your time. Goodbye.") is True
+    # The exact line the agent is told to say, which is what actually ends calls.
+    assert vapi_client.is_farewell(vapi_client.END_CALL_MESSAGE) is True
+
+
+# ---------------------------------------------------------------------------
+# Courtesy is not a closing
+# ---------------------------------------------------------------------------
+#
+# A live call died two sentences into the pitch. The client said "बोलिए" ("go
+# ahead"), the agent thanked them for it — "धन्यवाद. दरअसल, आपके account पर..." —
+# and a bare "धन्यवाद" was in the farewell list. All three hang-up guarantees
+# fired on the politest word in the language.
+#
+# The fix is not a longer blocklist. It is that a farewell has to be TERMINAL:
+# the utterance must END on it, and a lone word can only qualify if it means
+# nothing except that the call is over.
+
+_MID_CALL_COURTESY = [
+    "धन्यवाद. दरअसल, आपके account पर एक सौ निन्यानवे रुपए का payment pending है.",
+    "धन्यवाद. क्या आप आज payment कर सकते हैं?",
+    "शुक्रिया. मैं आपको link भेज देती हूं.",
+    "Dhanyavaad. Aapka payment pending hai.",
+    "Thank you. Can you pay by Friday?",
+    "Thanks, I will email you the link now.",
+    "Okay, take care of that today and we are done.",
+    "I will follow up with an email in a minute.",
+]
+
+
+@pytest.mark.parametrize("line", _MID_CALL_COURTESY)
+def test_ordinary_politeness_never_ends_the_call(line):
+    assert vapi_client.is_farewell(line) is False
+
+
+def test_the_courtesy_word_that_cut_the_live_call_is_not_published():
+    published = vapi_client.terminal_phrases()
+    assert "धन्यवाद" not in published
+    assert "dhanyavaad" not in published
+    assert "dhanyawad" not in published
+
+
+def test_a_courtesy_word_cannot_be_added_back_to_the_list():
+    """The blocklist is enforcement, not documentation: a courtesy word typed
+    into the Vapi dashboard is filtered before it can end a call."""
+    assert vapi_client.terminal_phrases(["धन्यवाद", "thank you", "shukriya"]) == []
+    assert vapi_client.terminal_phrases(["धन्यवाद", "अलविदा"]) == ["अलविदा"]
+
+
+def test_no_published_phrase_is_an_ambiguous_single_word():
+    """One word gets no context to disambiguate it, so only the closed set of
+    pure leave-taking words is allowed to stand alone."""
+    for phrase in vapi_client.terminal_phrases():
+        if len(phrase.split()) == 1:
+            assert phrase in vapi_client.CLOSING_WORDS, phrase
+
+
+def test_a_farewell_the_agent_talks_past_is_not_a_farewell():
+    """Terminal means terminal. Saying goodbye and then continuing is a figure of
+    speech, and hanging up on it truncates the call the client is still in."""
+    assert vapi_client.is_farewell("Goodbye is not what I meant, sorry.") is False
+    assert vapi_client.is_farewell("Goodbye.") is True
+
+
+def test_punctuation_around_the_closing_does_not_hide_it():
+    assert vapi_client.is_farewell("अलविदा।") is True
+    assert vapi_client.is_farewell("  Goodbye!  ") is True
+    assert vapi_client.is_farewell("Have a nice day...") is True
+
+
+def test_the_prompt_reserves_the_closing_words_for_the_closing():
+    """Matching is terminal now, but a model that says "goodbye" mid-sentence and
+    then stops still ends the call — so the prompt fences the word off too."""
+    prompt = vapi_client.ASSISTANT_SYSTEM_PROMPT
+    assert "Never say any of them mid-call" in prompt
 
 
 def test_no_greeting_survives_into_the_published_farewell_list():
@@ -1457,6 +1665,128 @@ def test_an_agent_only_call_still_asks_for_nothing():
 
 
 # ---------------------------------------------------------------------------
+# Asking what else is available is asking for a plan
+#
+# From the live call that exposed this: the client said "कोई और plan है आपके
+# पास?" — bare "plan", code-switched, with no money figure and none of the
+# installment vocabulary. Nothing matched, so the request was missed and the
+# customer was emailed nothing. A client asking what else you can do has asked.
+# ---------------------------------------------------------------------------
+
+
+_ASKED_WHAT_ELSE = (
+    "Agent: Can you clear it today?\nClient: कोई और plan है आपके पास?",
+    "Agent: Can you clear it today?\nClient: koi aur plan hai aapke paas?",
+    "Agent: Can you clear it today?\nClient: Is there another plan you can offer?",
+    "Agent: Can you clear it today?\nClient: any other option?",
+    "Agent: Can you clear it today?\nClient: कोई और तरीका है?",
+)
+
+
+@pytest.mark.parametrize("transcript", _ASKED_WHAT_ELSE)
+def test_asking_what_else_is_available_is_a_plan_request(transcript):
+    assert heuristic_plan_request(transcript)["requested"] is True
+
+
+@pytest.mark.parametrize("transcript", _ASKED_WHAT_ELSE)
+def test_asking_what_else_is_available_is_never_a_refusal(transcript):
+    assert heuristic_final_answer(transcript)["kind"] != "refused"
+
+
+def test_the_live_call_that_was_missed_now_asks_for_a_plan():
+    """Aditya Joshi's ₹199 call, in the order it was actually spoken."""
+    transcript = (
+        "Agent: Namaste Aditya ji, Naina bol rahi hoon.\n"
+        "Client: अभी पैसे नहीं हैं\n"
+        "Agent: Main samajh sakti hoon.\n"
+        "Client: कोई और plan है आपके पास?"
+    )
+    request = heuristic_plan_request(transcript)
+    assert request["requested"] is True
+    # The quote must be the client's own sentence, because it becomes the
+    # chatbot's opening line in the email they receive.
+    assert request["client_words"]
+
+
+def test_the_plan_wording_does_not_turn_a_refusal_into_a_request():
+    """"I am cancelling my plan" is a churn statement, not a request to split."""
+    assert (
+        heuristic_plan_request(
+            "Agent: Can you pay today?\nClient: No. I am cancelling and I already paid."
+        )["requested"]
+        is False
+    )
+
+
+# ---------------------------------------------------------------------------
+# Saying "yes" to the offered plan IS the request
+#
+# The agent is instructed to ask whether a customised plan is wanted, so on a
+# well-run call the client never has to find the vocabulary — they just say
+# "yes". Read from the client's turns alone that is indistinguishable from
+# agreeing to pay in full, so only the agent's preceding question separates
+# them.
+# ---------------------------------------------------------------------------
+
+
+_OFFER = "Agent: We can arrange a customised payment plan for you. Shall I email you the link to set it up?"
+
+_ACCEPTED = (
+    f"{_OFFER}\nClient: Yes please.",
+    f"{_OFFER}\nClient: हाँ, भेज दो.",
+    f"{_OFFER}\nClient: haan ji bhej do",
+    f"{_OFFER}\nClient: ok",
+    f"{_OFFER}\nClient: theek hai",
+)
+
+
+@pytest.mark.parametrize("transcript", _ACCEPTED)
+def test_accepting_the_offered_plan_is_a_request(transcript):
+    request = heuristic_plan_request(transcript)
+    assert request["requested"] is True
+    assert request["client_words"]
+
+
+@pytest.mark.parametrize(
+    "transcript",
+    (
+        f"{_OFFER}\nClient: No thanks.",
+        f"{_OFFER}\nClient: नहीं चाहिए.",
+        f"{_OFFER}\nClient: nahi, mat bhejo",
+    ),
+)
+def test_declining_the_offered_plan_is_not_a_request(transcript):
+    assert heuristic_plan_request(transcript)["requested"] is False
+
+
+def test_a_yes_with_no_offer_behind_it_is_not_a_plan_request():
+    """Agreeing to pay in full is a "yes" too, and must stay one."""
+    assert (
+        heuristic_plan_request("Agent: Can you pay by Friday?\nClient: Yes, I will.")["requested"]
+        is False
+    )
+
+
+def test_the_agent_offering_a_plan_alone_is_not_a_request():
+    assert heuristic_plan_request(_OFFER)["requested"] is False
+
+
+def test_changing_their_mind_about_the_offer_is_respected():
+    """The last thing the client said about the offer is the answer."""
+    assert (
+        heuristic_plan_request(
+            f"{_OFFER}\nClient: Yes please.\nAgent: I'll send it.\nClient: No, don't send it."
+        )["requested"]
+        is False
+    )
+
+
+def test_accepted_plan_offer_quotes_the_client_verbatim():
+    assert accepted_plan_offer(f"{_OFFER}\nClient: हाँ, भेज दो.") == "हाँ, भेज दो."
+    assert accepted_plan_offer("Agent: Can you pay?\nClient: Yes.") == ""
+
+
+# ---------------------------------------------------------------------------
 # The prompt has to offer the plan before it closes
 # ---------------------------------------------------------------------------
 
@@ -1476,6 +1806,196 @@ def test_the_prompt_still_refuses_to_argue_with_a_real_refusal():
     prompt = vapi_client.ASSISTANT_SYSTEM_PROMPT
     assert "accept it the\n  first time and end the call" in prompt
     assert "do not\n  offer a plan" in prompt
+
+
+# ---------------------------------------------------------------------------
+# The plan offer is shipped, not delegated
+# ---------------------------------------------------------------------------
+#
+# The script above was only ever sent on the inline branch. With
+# VAPI_ASSISTANT_ID set — which is how this is deployed — the assistant ran
+# whatever prompt an operator typed into Vapi's dashboard, and that prompt had no
+# flexible-plan branch at all. The live agent therefore never asked a client who
+# said they had no money whether to email the plan link, and because
+# accepted_plan_offer() keys on the offer's wording, detection had nothing to
+# anchor on either. The same failure, twice, from one missing override.
+
+
+def _dashboard_prompt(monkeypatch) -> str:
+    monkeypatch.setenv("VAPI_PUBLIC_KEY", "pk")
+    monkeypatch.setenv("VAPI_ASSISTANT_ID", "asst_1")
+    overrides = vapi_client.build_assistant(
+        vapi_client.vapi_config(), case_id="C-1", client_name="Aditya", amount=199.0
+    )["assistantOverrides"]
+    return overrides["model"]["messages"][0]["content"]
+
+
+def _inline_prompt(monkeypatch) -> str:
+    monkeypatch.setenv("VAPI_PUBLIC_KEY", "pk")
+    monkeypatch.delenv("VAPI_ASSISTANT_ID", raising=False)
+    assistant = vapi_client.build_assistant(
+        vapi_client.vapi_config(), case_id="C-1", client_name="Aditya", amount=199.0
+    )["assistant"]
+    return assistant["model"]["messages"][0]["content"]
+
+
+def test_a_dashboard_authored_assistant_cannot_be_built_without_the_plan_script(monkeypatch):
+    prompt = _dashboard_prompt(monkeypatch)
+    assert "We can arrange a customised payment plan for you." in prompt
+    assert "Shall I email you the link to set it up?" in prompt
+    assert "I'll email you a secure link" in prompt
+
+
+def test_both_branches_speak_the_same_script(monkeypatch):
+    """One prompt, two transports. A guarantee that holds on only one of them is
+    not a guarantee."""
+    assert _dashboard_prompt(monkeypatch) == _inline_prompt(monkeypatch)
+
+
+def test_the_forced_prompt_still_carries_the_case_facts(monkeypatch):
+    """Overriding the dashboard prompt removes its {{mustache}} variables from the
+    conversation, so the facts have to arrive as sentences instead."""
+    prompt = _dashboard_prompt(monkeypatch)
+    assert "Client name: Aditya." in prompt
+    assert "199 rupees" in prompt
+    # Spoken as a word, never as a symbol: the rupee sign was voiced as "dollars".
+    assert "\u20b9" not in prompt
+
+
+def test_the_forced_prompt_does_not_replace_the_template_variables(monkeypatch):
+    """A dashboard first message may still reference {{clientName}}; overriding the
+    model must not take the substitutions away from it."""
+    monkeypatch.setenv("VAPI_PUBLIC_KEY", "pk")
+    monkeypatch.setenv("VAPI_ASSISTANT_ID", "asst_1")
+    overrides = vapi_client.build_assistant(
+        vapi_client.vapi_config(), case_id="C-1", client_name="Aditya", amount=199.0
+    )["assistantOverrides"]
+    assert overrides["variableValues"]["clientName"] == "Aditya"
+    assert overrides["variableValues"]["amountDue"] == "199 rupees"
+
+
+def test_the_plan_offer_stays_gated_on_a_money_shortage(monkeypatch):
+    """The ask is for a client who said they cannot pay in full — never a blanket
+    question, and never twice."""
+    for prompt in (_dashboard_prompt(monkeypatch), _inline_prompt(monkeypatch)):
+        assert "Never volunteer one to a client who has not said" in prompt
+        assert "never offer one twice" in prompt
+        assert "cannot pay the full amount" in prompt
+
+
+def test_the_prompt_promises_an_emailed_chatbot_and_decides_nothing_itself():
+    """The agent promises a link and stops. The schedule is somebody else's call."""
+    script = vapi_client.PLAN_OFFER_INSTRUCTIONS
+    assert "Never name an amount, never name a date" in script
+    assert "you only promise the link" in script
+
+
+def test_the_offer_the_prompt_dictates_is_the_offer_detection_recognises():
+    """The two halves are coupled through wording: if the agent's offer turn does
+    not match an offer hint, a client's "yes" is credited to nothing."""
+    offer = "Agent: We can arrange a customised payment plan for you."
+    question = "Agent: Shall I email you the link to set it up?"
+    assert accepted_plan_offer(f"{offer}\nClient: Yes please.") == "Yes please."
+    assert accepted_plan_offer(f"{question}\nClient: हाँ.") == "हाँ."
+    assert heuristic_plan_request(f"{question}\nClient: Yes, send it.")["requested"] is True
+
+
+# ---------------------------------------------------------------------------
+# The payload the provider will actually accept
+# ---------------------------------------------------------------------------
+#
+# Forcing the prompt onto the dashboard assistant was correct and still broke every
+# live call: ``POST https://api.vapi.ai/call/web`` answered
+#
+#   {"message": ["assistantOverrides.model.maxTokens must not be less than 50"],
+#    "error": "Bad Request", "statusCode": 400}
+#
+# and the browser SDK surfaced it as `start-method-error`. Nothing above caught it,
+# because every assistant test asserts on the dictionary we build and none of them
+# knows what the provider will take. These do: the numeric bounds below are copied
+# from Vapi's own OpenAPI schema, and the assistant is checked against them the way
+# the API checks it. A field the provider would reject now fails here first.
+#
+# Both branches are checked, because the same model block is sent inline and as an
+# override, and a bound is only worth pinning if it holds everywhere it is used.
+PROVIDER_BOUNDS: dict[str, tuple[float, float]] = {
+    # OpenAIModel.maxTokens — the field that caused the 400.
+    "maxTokens": (50, 10000),
+    "temperature": (0, 2),
+    # AssistantOverrides.maxDurationSeconds
+    "maxDurationSeconds": (10, 43200),
+    # StartSpeakingPlan / StopSpeakingPlan
+    "waitSeconds": (0, 5),
+    "numWords": (0, 10),
+    "voiceSeconds": (0, 0.5),
+    "backoffSeconds": (0, 10),
+}
+
+
+def _within_bounds(payload: dict[str, object]) -> list[str]:
+    """Every bounded field in ``payload``, reported as a list of violations."""
+    broken: list[str] = []
+    for field, (low, high) in PROVIDER_BOUNDS.items():
+        if field in payload and not low <= float(payload[field]) <= high:  # type: ignore[arg-type]
+            broken.append(f"{field}={payload[field]} outside [{low}, {high}]")
+    return broken
+
+
+def test_the_model_block_respects_the_provider_s_own_limits():
+    """`maxTokens: 40` was rejected outright. The floor is 50, and it is the
+    provider's floor rather than a preference — no call happens below it."""
+    model = vapi_client.model_settings(client_name="Aditya", amount=199.0)
+    assert _within_bounds(model) == []
+    assert model["maxTokens"] >= vapi_client.PROVIDER_MIN_MAX_TOKENS
+
+
+def test_the_reply_cap_is_not_quietly_lowered_below_the_floor():
+    """A future attempt to shorten replies must go through the prompt, not through
+    a number the API refuses."""
+    assert vapi_client.MODEL_MAX_TOKENS >= vapi_client.PROVIDER_MIN_MAX_TOKENS
+
+
+@pytest.mark.parametrize("branch", ["dashboard", "inline"])
+def test_every_number_sent_to_the_provider_is_inside_its_accepted_range(monkeypatch, branch):
+    monkeypatch.setenv("VAPI_PUBLIC_KEY", "pk")
+    if branch == "dashboard":
+        monkeypatch.setenv("VAPI_ASSISTANT_ID", "asst_1")
+    else:
+        monkeypatch.delenv("VAPI_ASSISTANT_ID", raising=False)
+    built = vapi_client.build_assistant(vapi_client.vapi_config(), case_id="C-1", client_name="Aditya", amount=199.0)
+    body = built.get("assistantOverrides") or built["assistant"]
+
+    broken = _within_bounds(body)
+    broken += _within_bounds(body["model"])
+    broken += _within_bounds(body["startSpeakingPlan"])
+    broken += _within_bounds(body["stopSpeakingPlan"])
+    assert broken == []
+
+
+@pytest.mark.parametrize("branch", ["dashboard", "inline"])
+def test_the_farewell_list_fits_the_field_that_carries_it(monkeypatch, branch):
+    """``endCallPhrases`` items are 2-140 characters and ``endCallMessage`` is
+    capped at 1000. The closing line is bilingual and the phrase list is generated,
+    so neither length is obvious by inspection."""
+    monkeypatch.setenv("VAPI_PUBLIC_KEY", "pk")
+    if branch == "dashboard":
+        monkeypatch.setenv("VAPI_ASSISTANT_ID", "asst_1")
+    else:
+        monkeypatch.delenv("VAPI_ASSISTANT_ID", raising=False)
+    built = vapi_client.build_assistant(vapi_client.vapi_config(), case_id="C-1", client_name="Aditya")
+    body = built.get("assistantOverrides") or built["assistant"]
+
+    assert body["endCallPhrases"], "the hang-up guarantee needs at least one phrase"
+    assert all(2 <= len(phrase) <= 140 for phrase in body["endCallPhrases"])
+    assert len(body["endCallMessage"]) <= 1000
+
+
+def test_the_prompt_the_override_carries_is_within_the_field_s_limit():
+    """``OpenAIMessage.content`` is capped at 100,000,000 characters — no risk in
+    practice, but the prompt is assembled from several constants and this is the one
+    place that records the cap exists."""
+    prompt = vapi_client.model_settings(client_name="Aditya", amount=199.0)["messages"][0]["content"]
+    assert 0 < len(prompt) <= 100_000_000
 
 
 # ---------------------------------------------------------------------------

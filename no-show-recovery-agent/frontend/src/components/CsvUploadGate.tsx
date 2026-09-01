@@ -133,11 +133,17 @@ function SchemaTable({ title, rows }: { title: string; rows: SchemaColumn[] }) {
 
 export function CsvUploadGate({ onReady }: { onReady: () => void }) {
     const inputRef = useRef<HTMLInputElement | null>(null);
+    const profileInputRef = useRef<HTMLInputElement | null>(null);
+    const [step, setStep] = useState<"csv" | "business">("csv");
     const [file, setFile] = useState<File | null>(null);
     const [uploading, setUploading] = useState(false);
     const [error, setError] = useState<string | null>(null);
     const [issues, setIssues] = useState<string[]>([]);
     const [dragging, setDragging] = useState(false);
+    const [profileText, setProfileText] = useState("");
+    const [profileFile, setProfileFile] = useState<File | null>(null);
+    const [savingProfile, setSavingProfile] = useState(false);
+    const [profileError, setProfileError] = useState<string | null>(null);
 
     const chooseFile = useCallback((selected: File | null) => {
         setError(null);
@@ -160,6 +166,11 @@ export function CsvUploadGate({ onReady }: { onReady: () => void }) {
         URL.revokeObjectURL(url);
     }, []);
 
+    /**
+     * Upload the cases, then move to the business document rather than opening
+     * the console. The CSV is what the dashboard cannot run without, so it is
+     * the only step that can fail its way back to the start.
+     */
     const submit = useCallback(async () => {
         if (!file) return;
         setUploading(true);
@@ -167,7 +178,7 @@ export function CsvUploadGate({ onReady }: { onReady: () => void }) {
         setIssues([]);
         try {
             await uploadRecoveryCsv(file);
-            onReady();
+            setStep("business");
         } catch (caught) {
             if (caught instanceof ApiError) {
                 setError(caught.message);
@@ -178,7 +189,174 @@ export function CsvUploadGate({ onReady }: { onReady: () => void }) {
         } finally {
             setUploading(false);
         }
-    }, [file, onReady]);
+    }, [file]);
+
+    /** Store the business document — a picked file wins over typed prose. */
+    const saveProfile = useCallback(async () => {
+        setSavingProfile(true);
+        setProfileError(null);
+        try {
+            if (profileFile) {
+                await uploadBusinessProfile(profileFile);
+            } else {
+                await saveBusinessProfile(profileText);
+            }
+            onReady();
+        } catch (caught) {
+            setProfileError(
+                caught instanceof ApiError
+                    ? caught.message
+                    : "The document could not be saved. Please try again."
+            );
+        } finally {
+            setSavingProfile(false);
+        }
+    }, [onReady, profileFile, profileText]);
+
+    const profileReady = profileFile !== null || profileText.trim().length >= MIN_PROFILE_CHARS;
+
+    if (step === "business") {
+        return (
+            <div className="flex h-full min-h-0 flex-1 overflow-y-auto bg-background">
+                <div className="mx-auto flex w-full max-w-3xl flex-col gap-8 px-6 py-10 lg:px-10">
+                    <header className="flex flex-col gap-3">
+                        <span className="flex items-center gap-2 text-sm font-medium text-action-indigo">
+                            <Icon className="text-[18px]">description</Icon>
+                            Step 2 of 2 · Describe your business
+                        </span>
+                        <h1 className="text-3xl font-light tracking-tight">
+                            What are these customers paying for?
+                        </h1>
+                        <p className="max-w-2xl text-base text-text-muted">
+                            Your cases are loaded. This last step is optional context, not more data. When a
+                            customer opens the payment-plan chat from their recovery email and asks what the
+                            charge was for, the assistant answers from what you write here — in your words,
+                            rather than deflecting.
+                        </p>
+                        <p className="max-w-2xl rounded-lg border border-action-indigo/20 bg-action-indigo/5 px-4 py-3 text-sm text-text-muted">
+                            <span className="font-medium text-text-primary">It cannot change any decision.</span>{" "}
+                            Installment limits, minimum first payments, and whether a discount is allowed are
+                            decided by the policy engine, which never reads this document. It shapes how the
+                            assistant talks, never what it agrees to.
+                        </p>
+                    </header>
+
+                    <section className="flex flex-col gap-3">
+                        <label htmlFor="business-doc" className="text-sm font-semibold text-text-primary">
+                            Write it here
+                        </label>
+                        <ul className="list-disc space-y-1 pl-5 text-sm text-text-muted">
+                            {PROFILE_PROMPTS.map((prompt) => (
+                                <li key={prompt}>{prompt}</li>
+                            ))}
+                        </ul>
+                        <textarea
+                            id="business-doc"
+                            rows={12}
+                            value={profileText}
+                            disabled={profileFile !== null}
+                            onChange={(event) => {
+                                setProfileError(null);
+                                setProfileText(event.target.value);
+                            }}
+                            placeholder={PROFILE_EXAMPLE}
+                            className="w-full rounded-lg border border-border-slate bg-surface p-4 font-sans text-sm leading-relaxed text-text-primary shadow-sm placeholder:text-text-muted/60 focus:border-action-indigo focus:outline-none disabled:opacity-50"
+                        />
+                        <div className="flex flex-wrap items-center gap-3 text-sm">
+                            <button
+                                type="button"
+                                className="rounded-lg border border-border-slate bg-surface px-3 py-1.5 font-medium shadow-sm hover:bg-surface-container-low disabled:cursor-not-allowed disabled:opacity-50"
+                                disabled={profileFile !== null}
+                                onClick={() => {
+                                    setProfileError(null);
+                                    setProfileText(PROFILE_EXAMPLE);
+                                }}
+                            >
+                                Start from the example
+                            </button>
+                            <span className="text-text-muted">
+                                {profileText.trim().length} characters · {MIN_PROFILE_CHARS} minimum
+                            </span>
+                        </div>
+                    </section>
+
+                    <section className="flex flex-col gap-3">
+                        <h2 className="text-sm font-semibold text-text-primary">Or upload a document</h2>
+                        <p className="text-sm text-text-muted">
+                            A plain-text or Markdown file you already keep — an FAQ, a policy page, an
+                            onboarding note. PDFs and Word files cannot be read; paste their text instead.
+                        </p>
+                        <input
+                            ref={profileInputRef}
+                            type="file"
+                            accept=".txt,.md,.text,text/plain,text/markdown"
+                            className="hidden"
+                            onChange={(event) => {
+                                setProfileError(null);
+                                setProfileFile(event.target.files?.[0] ?? null);
+                            }}
+                        />
+                        <div className="flex flex-wrap items-center gap-3">
+                            <button
+                                type="button"
+                                className="rounded-lg border border-border-slate bg-surface px-4 py-2 text-sm font-medium shadow-sm hover:bg-surface-container-low"
+                                onClick={() => profileInputRef.current?.click()}
+                            >
+                                Choose a file
+                            </button>
+                            {profileFile && (
+                                <span className="flex items-center gap-2 text-sm text-text-muted">
+                                    <Icon className="text-[18px] text-action-indigo">description</Icon>
+                                    {profileFile.name}
+                                    <button
+                                        type="button"
+                                        className="font-medium text-action-indigo hover:underline"
+                                        onClick={() => {
+                                            setProfileFile(null);
+                                            if (profileInputRef.current) profileInputRef.current.value = "";
+                                        }}
+                                    >
+                                        Remove
+                                    </button>
+                                </span>
+                            )}
+                        </div>
+                    </section>
+
+                    {profileError && (
+                        <div
+                            className="rounded-lg border border-error/30 bg-error-container/60 px-4 py-3 text-sm text-error"
+                            role="alert"
+                        >
+                            {profileError}
+                        </div>
+                    )}
+
+                    <div className="flex flex-wrap items-center gap-3 border-t border-border-slate pt-6">
+                        <button
+                            type="button"
+                            className="rounded-lg bg-action-indigo px-4 py-2 text-sm font-medium text-white shadow-sm disabled:cursor-not-allowed disabled:opacity-50"
+                            disabled={!profileReady || savingProfile}
+                            onClick={() => void saveProfile()}
+                        >
+                            {savingProfile ? "Saving…" : "Save and open the console"}
+                        </button>
+                        <button
+                            type="button"
+                            className="rounded-lg border border-border-slate bg-surface px-4 py-2 text-sm font-medium shadow-sm hover:bg-surface-container-low disabled:cursor-not-allowed disabled:opacity-50"
+                            disabled={savingProfile}
+                            onClick={onReady}
+                        >
+                            Skip for now
+                        </button>
+                        <span className="text-sm text-text-muted">
+                            You can add or replace this document later without re-uploading your cases.
+                        </span>
+                    </div>
+                </div>
+            </div>
+        );
+    }
 
     return (
         <div className="flex h-full min-h-0 flex-1 overflow-y-auto bg-background">
@@ -186,7 +364,7 @@ export function CsvUploadGate({ onReady }: { onReady: () => void }) {
                 <header className="flex flex-col gap-3">
                     <span className="flex items-center gap-2 text-sm font-medium text-action-indigo">
                         <Icon className="text-[18px]">upload_file</Icon>
-                        Step 1 of 1 · Load your data
+                        Step 1 of 2 · Load your data
                     </span>
                     <h1 className="text-3xl font-light tracking-tight">Upload your recovery cases</h1>
                     <p className="max-w-2xl text-base text-text-muted">

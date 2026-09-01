@@ -1047,6 +1047,13 @@ amount, they can only pay part of it, they want installments or an EMI, they can
 pay something now and the rest later, they need to split the payment, or they ask
 what payment options are available.
 
+Also set "requested" true when the client asks whether ANY OTHER ARRANGEMENT
+exists, in any wording and in any language, even without the words "payment" or
+"installment" — "is there another plan?", "any other option?", "कोई और plan है
+आपके पास?", "koi aur tarika hai?". A client asking what else you can do has
+asked for a plan. Answering the agent's own offer of a plan with a plain "yes"
+counts as well: the request is theirs the moment they accept it.
+
 Set "requested" false when: only the AGENT mentioned a plan and the client did
 not take it up; the client refused to pay at all and showed no interest in an
 alternative; the client asked for more TIME on the full amount rather than a
@@ -1087,6 +1094,20 @@ _PLAN_REQUEST_HINTS = (
     "in parts", "part payment", "partial payment", "split the payment", "split it",
     "some now", "some amount now", "pay some", "half now", "rest later",
     "rest on", "remaining later", "payment plan", "payment options", "flexible",
+    # A client ASKING WHAT ELSE IS AVAILABLE is asking for a plan, even when
+    # they never say the word "payment". The live call that exposed this had the
+    # client say "कोई और plan है आपके पास?" — bare "plan", code-switched, and
+    # matched by none of the phrases above, so the request was missed and the
+    # customer was sent nothing. "plan" is only matched with a qualifier that
+    # makes it a question about alternatives, so "cancel my plan" stays clear.
+    "another plan", "other plan", "any plan", "different plan", "some other plan",
+    "other option", "another option", "any option", "other way", "another way",
+    "what else can", "anything else you can", "alternative",
+    "कोई और plan", "और plan", "दूसरा plan", "कोई plan", "plan है",
+    "कोई और तरीका", "कोई तरीका", "और कोई रास्ता", "कोई रास्ता", "कोई और option",
+    "koi aur plan", "koi plan", "dusra plan", "doosra plan", "aur koi plan",
+    "koi aur tarika", "koi tarika", "koi aur rasta", "koi rasta",
+    "koi aur option", "koi option", "aur kya kar sakte",
     "पूरा नहीं", "पूरे पैसे नहीं", "इतने पैसे नहीं", "पैसे कम", "किस्त", "किश्त",
     "किस्तों", "किश्तों", "थोड़े पैसे", "थोड़ा अभी", "आधा अभी", "बाकी बाद",
     "बाकी में", "टुकड़ों", "ईएमआई", "एक साथ नहीं",
@@ -1137,17 +1158,129 @@ def _spoken_amounts(text: str) -> list[float]:
     return amounts
 
 
+# The agent's own offer, as the prompt instructs it to phrase the question, plus
+# the paraphrases a language model reliably produces from that instruction. Used
+# only to recognise the turn a client is answering — never to count the offer
+# itself as a request.
+_PLAN_OFFER_HINTS = (
+    "payment plan", "customised payment plan", "customized payment plan",
+    "email you the link", "email you a secure link", "shall i email",
+    "link to set it up", "set up a plan", "plan that works for you",
+    "भुगतान योजना", "payment plan bhej", "plan bhej", "link bhej",
+    "किस्तों में", "kiston mein", "link email",
+)
+
+# A client accepting that offer. Short by nature — the whole turn is often one
+# word — so these are matched against the turn as a whole rather than searched
+# for inside a longer sentence, which is what keeps "no, not okay" out.
+_PLAN_ACCEPT_HINTS = (
+    "yes", "yeah", "yep", "yup", "ok", "okay", "sure", "please", "please do",
+    "yes please", "go ahead", "send it", "send it please", "email it",
+    "email me", "that works", "sounds good", "alright", "fine",
+    "हाँ", "हां", "जी", "जी हाँ", "जी हां", "ठीक है", "ठीक", "हाँ जी",
+    "भेज दो", "भेज दीजिए", "भेज देना", "कर दो", "हाँ भेज दो",
+    "haan", "haa", "ha", "ji", "ji haan", "haan ji", "theek hai", "thik hai",
+    "theek", "bhej do", "bhej dijiye", "bhej dena", "kar do", "haan bhej do",
+)
+
+# A refusal of the offer, tested first so "no thanks" and "nahi, mat bhejo"
+# cannot be read as acceptance through the "thanks" or the "bhej".
+_PLAN_DECLINE_HINTS = (
+    "no", "no thanks", "no thank you", "not interested", "don't", "do not",
+    "नहीं", "नहीं चाहिए", "मत", "nahi", "nahin", "nai", "mat", "nahi chahiye",
+)
+
+
+def _speaker_turns(transcript: str) -> list[tuple[str, str]]:
+    """The transcript as ``[(speaker, words)]`` with ``speaker`` in
+    ``{"agent", "client", ""}``.
+
+    Sequence matters for one question this module asks — did the client accept
+    what the agent just offered? — and that cannot be answered from the client's
+    turns alone.
+    """
+    turns: list[tuple[str, str]] = []
+    for raw in str(transcript or "").splitlines():
+        line = raw.strip()
+        if not line:
+            continue
+        lowered = line.lower()
+        for prefix in _AGENT_PREFIXES:
+            if lowered.startswith(prefix):
+                turns.append(("agent", line[len(prefix):].strip()))
+                break
+        else:
+            for prefix in _CLIENT_PREFIXES:
+                if lowered.startswith(prefix):
+                    turns.append(("client", line[len(prefix):].strip()))
+                    break
+            else:
+                turns.append(("", line))
+    return [(who, words) for who, words in turns if words]
+
+
+def accepted_plan_offer(transcript: str) -> str:
+    """The client's words accepting an offered payment plan, or ``""``.
+
+    The user's own instruction for the call is that the agent ASKS whether a
+    customised plan is wanted, so the commonest request on a well-run call is a
+    one-word "yes" that mentions neither money nor installments. Read from the
+    client's turns alone that is indistinguishable from agreeing to pay in full;
+    only the agent's preceding question tells them apart, which is why this
+    walks the call in order.
+
+    A later refusal wins: a client who says "yes" and then "no, don't send it"
+    has declined, and the last thing they said about the offer is the answer.
+    """
+    accepted = ""
+    offered = False
+    for who, words in _speaker_turns(transcript):
+        if who == "agent":
+            if any(hint in words.lower() for hint in _PLAN_OFFER_HINTS):
+                offered = True
+            continue
+        if who != "client" or not offered:
+            continue
+        # Punctuation and filler are stripped so a whole turn like "Haan, ok."
+        # is compared as the two words it is.
+        spoken = re.sub(r"[^\w\s\u0900-\u097f]+", " ", words.lower()).strip()
+        collapsed = " ".join(spoken.split())
+        if not collapsed:
+            continue
+        tokens = collapsed.split()
+        if any(token in _PLAN_DECLINE_HINTS for token in tokens) or collapsed in _PLAN_DECLINE_HINTS:
+            accepted = ""
+            continue
+        if collapsed in _PLAN_ACCEPT_HINTS or (len(tokens) <= 5 and any(token in _PLAN_ACCEPT_HINTS for token in tokens)):
+            accepted = words[:160]
+    return accepted
+
+
 def heuristic_plan_request(transcript: str) -> dict[str, Any]:
-    """Deterministic flexible-plan fallback, read only from the client's turns.
+    """Deterministic flexible-plan fallback, read from the call in order.
 
     Conservative on purpose, and in the opposite direction to
     :func:`decide_follow_up_email`: an unreachable model must not invent a
     request, because a request diverts the follow-up away from the payment link
     the agent promised aloud. Silence therefore means "not requested".
+
+    Two things count as a request. The client asking for one in their own words
+    is the obvious case. The client saying "yes" to the agent's offer of one is
+    the other, and it is the case a well-run call produces most often — the
+    agent is instructed to ask, so the client never has to find the vocabulary.
     """
     lines = _client_lines(transcript)
     matches = [index for index, line in enumerate(lines) if any(hint in line.lower() for hint in _PLAN_REQUEST_HINTS)]
     if not matches:
+        if accepted := accepted_plan_offer(transcript):
+            return {
+                "requested": True,
+                "initial_amount": None,
+                "note": "The client accepted the payment plan the agent offered.",
+                "client_words": accepted,
+                "confidence": 0.65,
+                "source": "heuristic",
+            }
         return {
             "requested": False,
             "initial_amount": None,

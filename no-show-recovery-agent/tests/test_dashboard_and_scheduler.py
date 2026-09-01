@@ -39,7 +39,9 @@ def test_dashboard_metrics_and_route(tmp_path, monkeypatch):
     response = app.test_client().get("/dashboard")
     assert response.status_code == 200
     body = response.get_data(as_text=True)
-    assert '<div id="root"></div>' in body
+    # Matched on the id alone: the mount point carries sizing classes the customer
+    # plan page needs, and this test cares only that the bundle's root is served.
+    assert 'id="root"' in body
     assert "/static/clients/assets/" in body
     assert "Cases processed" not in body
     assert "C1" not in body and "C3" not in body
@@ -156,7 +158,7 @@ def test_clients_route_serves_compiled_react_console(monkeypatch):
     response = app.test_client().get("/clients")
     assert response.status_code == 200
     body = response.get_data(as_text=True)
-    assert '<div id="root"></div>' in body
+    assert 'id="root"' in body
     assert "/static/clients/assets/" in body
     assert "Client Console" not in body
 

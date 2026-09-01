@@ -147,7 +147,7 @@ export function FlexiblePlanChat() {
     const [pending, setPending] = useState<PlanTurn | null>(null);
     const [payUrl, setPayUrl] = useState("");
     const [emailed, setEmailed] = useState(false);
-    const streamEnd = useRef<HTMLDivElement | null>(null);
+    const streamRef = useRef<HTMLDivElement | null>(null);
 
     useEffect(() => {
         let active = true;
@@ -166,8 +166,15 @@ export function FlexiblePlanChat() {
         };
     }, [token]);
 
+    // The conversation is the one scrolling region on the page, so it is pinned to
+    // its own bottom rather than asked to scroll an element into view.
+    // `scrollIntoView` walks up and moves whichever ancestor is scrollable too,
+    // which on a phone meant the composer and the Confirm Plan buttons drifting
+    // off the bottom of the screen the moment the assistant replied.
     useEffect(() => {
-        streamEnd.current?.scrollIntoView({ behavior: "smooth", block: "end" });
+        const stream = streamRef.current;
+        if (!stream) return;
+        stream.scrollTo({ top: stream.scrollHeight, behavior: "smooth" });
     }, [turns, thinking, pending]);
 
     const history = useMemo(() => turns.map((turn) => ({ role: turn.role, text: turn.text })), [turns]);
@@ -232,7 +239,7 @@ export function FlexiblePlanChat() {
 
     if (loadError) {
         return (
-            <main className="flex min-h-screen items-center justify-center bg-background p-6 text-text-primary">
+            <main className="flex h-[100dvh] items-center justify-center bg-background p-6 text-text-primary">
                 <div className="w-full max-w-md rounded-2xl border border-border-slate bg-surface p-8 text-center shadow-sm">
                     <span className="material-symbols-outlined text-[36px] text-error" aria-hidden="true">
                         link_off
@@ -246,7 +253,7 @@ export function FlexiblePlanChat() {
 
     if (!snapshot) {
         return (
-            <main className="flex min-h-screen items-center justify-center bg-background text-text-muted">
+            <main className="flex h-[100dvh] items-center justify-center bg-background text-text-muted">
                 <span className="material-symbols-outlined animate-spin text-[28px]" aria-hidden="true">
                     progress_activity
                 </span>
@@ -257,41 +264,66 @@ export function FlexiblePlanChat() {
 
     const locked = snapshot.expired || snapshot.status === "active" || snapshot.status === "completed";
 
+    /**
+     * The page is one viewport-tall column, not a document that grows.
+     *
+     * It used to be a stack of cards on a scrolling page, with the message list
+     * capped at `52vh` inside it. On a phone the header, that cap, the plan
+     * summary and the composer together exceeded the screen, so the parts a
+     * customer has to reach — Confirm Plan, Change Plan, the Pay now button, the
+     * text box — sat below the fold of an outer scroll they had no reason to
+     * suspect. Hence: fixed height, exactly one scrolling region (the
+     * conversation, which carries the account details at its top), and every
+     * control pinned to the bottom edge where it cannot be scrolled away.
+     *
+     * `100dvh` rather than `100vh` because mobile browsers count the collapsing
+     * URL bar in `vh`, which is precisely how a composer ends up under it.
+     */
     return (
-        <main className="flex min-h-screen justify-center bg-background px-4 py-6 text-text-primary sm:py-10">
-            <div className="flex w-full max-w-2xl flex-col gap-4">
-                <header className="rounded-2xl border border-border-slate bg-surface p-5 shadow-sm">
-                    <div className="flex items-start justify-between gap-4">
-                        <div>
-                            <p className="text-[11px] font-semibold uppercase tracking-wider text-action-indigo">Flexible Payment Plan</p>
-                            <h1 className="mt-1 text-xl font-semibold tracking-tight">Hi {snapshot.customer_name}</h1>
-                        </div>
-                        <span className="shrink-0 rounded-full bg-surface-container-high px-3 py-1 text-xs font-medium text-text-muted">{snapshot.status_label}</span>
+        <main className="flex h-[100dvh] justify-center bg-background text-text-primary sm:p-6">
+            <div className="flex h-full w-full max-w-2xl flex-col overflow-hidden border-border-slate bg-surface sm:rounded-2xl sm:border sm:shadow-sm">
+                {/* Slim and always on screen: who this is for and what is still owed. */}
+                <header className="flex shrink-0 items-center justify-between gap-3 border-b border-border-slate px-4 py-3">
+                    <div className="min-w-0">
+                        <p className="truncate text-[11px] font-semibold uppercase tracking-wider text-action-indigo">Flexible Payment Plan</p>
+                        <h1 className="truncate text-base font-semibold tracking-tight sm:text-lg">Hi {snapshot.customer_name}</h1>
                     </div>
-                    <dl className="mt-4 grid grid-cols-2 gap-x-6 gap-y-3 text-sm sm:grid-cols-3">
-                        <div>
-                            <dt className="text-xs text-text-muted">Original amount</dt>
-                            <dd className="font-semibold">{formatInr(snapshot.original_amount)}</dd>
-                        </div>
-                        <div>
-                            <dt className="text-xs text-text-muted">Paid so far</dt>
-                            <dd className="font-semibold text-success">{formatInr(snapshot.amount_paid)}</dd>
-                        </div>
-                        <div>
-                            <dt className="text-xs text-text-muted">Remaining</dt>
-                            <dd className="font-semibold">{formatInr(snapshot.amount_remaining)}</dd>
-                        </div>
-                    </dl>
-                    {snapshot.plan_summary && <p className="mt-4 rounded-lg bg-surface-subtle px-3 py-2 text-sm text-text-muted">Your plan: {snapshot.plan_summary}</p>}
-                    <p className="mt-3 text-xs text-text-muted">{snapshot.policy}</p>
+                    <div className="flex shrink-0 flex-col items-end gap-1">
+                        <span className="rounded-full bg-surface-container-high px-2.5 py-0.5 text-[11px] font-medium text-text-muted">{snapshot.status_label}</span>
+                        <span className="text-xs text-text-muted">
+                            Remaining <strong className="font-semibold text-text-primary">{formatInr(snapshot.amount_remaining)}</strong>
+                        </span>
+                    </div>
                 </header>
 
-                <section className="flex flex-col rounded-2xl border border-border-slate bg-surface shadow-sm" aria-label="Payment plan conversation">
-                    <div className="flex flex-col gap-3 overflow-y-auto px-5 py-5" style={{ maxHeight: "52vh" }} role="log" aria-live="polite">
+                {/* The only scroll in the page. The account details lead it, so they are
+                    reachable by scrolling up instead of permanently occupying height. */}
+                <div ref={streamRef} className="min-h-0 flex-1 overflow-y-auto overscroll-contain px-4 py-4" aria-label="Payment plan conversation">
+                    <div className="rounded-xl border border-border-slate bg-surface-subtle px-4 py-3">
+                        <dl className="grid grid-cols-3 gap-x-4 gap-y-2 text-sm">
+                            <div>
+                                <dt className="text-xs text-text-muted">Original</dt>
+                                <dd className="font-semibold">{formatInr(snapshot.original_amount)}</dd>
+                            </div>
+                            <div>
+                                <dt className="text-xs text-text-muted">Paid so far</dt>
+                                <dd className="font-semibold text-success">{formatInr(snapshot.amount_paid)}</dd>
+                            </div>
+                            <div>
+                                <dt className="text-xs text-text-muted">Remaining</dt>
+                                <dd className="font-semibold">{formatInr(snapshot.amount_remaining)}</dd>
+                            </div>
+                        </dl>
+                        {snapshot.plan_summary && <p className="mt-3 text-sm text-text-muted">Your plan: {snapshot.plan_summary}</p>}
+                        <p className="mt-2 text-xs text-text-muted">{snapshot.policy}</p>
+                        <p className="mt-2 text-xs text-text-muted">This link is private to you and expires. Please don't forward it.</p>
+                    </div>
+
+                    <div className="mt-4 flex flex-col gap-3" role="log" aria-live="polite">
                         {turns.map((turn, index) => (
                             <div key={index} className={`flex ${turn.role === "customer" ? "justify-end" : "justify-start"}`}>
                                 <p
-                                    className={`max-w-[85%] whitespace-pre-line rounded-2xl px-4 py-2.5 text-sm ${turn.role === "customer" ? "bg-action-indigo text-white" : "bg-surface-container-low text-text-primary"
+                                    className={`max-w-[85%] whitespace-pre-line break-words rounded-2xl px-4 py-2.5 text-sm ${turn.role === "customer" ? "bg-action-indigo text-white" : "bg-surface-container-low text-text-primary"
                                         }`}
                                 >
                                     {turn.text}
@@ -303,99 +335,100 @@ export function FlexiblePlanChat() {
                                 Working out your plan…
                             </p>
                         )}
-                        <div ref={streamEnd} />
                     </div>
+                </div>
 
-                    {pending && (
-                        <div className="border-t border-border-slate bg-surface-subtle px-5 py-4">
-                            <p className="text-[11px] font-semibold uppercase tracking-wider text-text-muted">Plan summary</p>
-                            <ul className="mt-2 flex flex-col gap-1 text-sm">
-                                {pending.installments.map((row) => (
-                                    <li key={row.index} className="flex items-center justify-between gap-4">
-                                        <span className="text-text-muted">
-                                            Payment {row.index} · {dueLabel(row.due_date)}
-                                        </span>
-                                        <strong>{formatInr(row.amount)}</strong>
-                                    </li>
-                                ))}
-                            </ul>
-                            <p className="mt-2 text-xs text-text-muted">
-                                Due now {formatInr(pending.due_now)} · Remaining {formatInr(pending.remaining)} · Total {formatInr(pending.total)}
-                            </p>
-                            <div className="mt-4 flex flex-wrap gap-2">
-                                <button
-                                    type="button"
-                                    className="rounded-lg bg-action-indigo px-4 py-2 text-sm font-semibold text-white disabled:opacity-60"
-                                    onClick={() => void confirmPlan()}
-                                    disabled={confirming}
-                                >
-                                    {confirming ? "Confirming…" : "Confirm Plan"}
-                                </button>
-                                <button
-                                    type="button"
-                                    className="rounded-lg border border-border-slate bg-surface px-4 py-2 text-sm font-medium hover:bg-surface-container-low disabled:opacity-60"
-                                    onClick={changePlan}
-                                    disabled={confirming}
-                                >
-                                    Change Plan
-                                </button>
-                            </div>
-                            {notice && <p className="mt-3 text-sm text-error">{notice}</p>}
-                        </div>
-                    )}
-
-                    {payUrl && (
-                        <div className="border-t border-border-slate bg-success/5 px-5 py-4">
-                            <p className="text-sm font-medium">Your plan is confirmed.</p>
-                            <p className="mt-1 text-xs text-text-muted">
-                                {emailed ? "We've emailed this payment link to you as well." : "Use the button below to pay your first installment."}
-                            </p>
-                            <a
-                                className="mt-3 inline-flex items-center gap-2 rounded-lg bg-success px-4 py-2 text-sm font-semibold text-white"
-                                href={payUrl}
-                                target="_blank"
-                                rel="noreferrer noopener"
+                {/* Everything below is pinned. A long schedule scrolls inside its own
+                    panel so the two buttons under it stay on screen regardless. */}
+                {pending && (
+                    <div className="max-h-[45dvh] shrink-0 overflow-y-auto border-t border-border-slate bg-surface-subtle px-4 py-4">
+                        <p className="text-[11px] font-semibold uppercase tracking-wider text-text-muted">Plan summary</p>
+                        <ul className="mt-2 flex flex-col gap-1 text-sm">
+                            {pending.installments.map((row) => (
+                                <li key={row.index} className="flex items-center justify-between gap-4">
+                                    <span className="text-text-muted">
+                                        Payment {row.index} · {dueLabel(row.due_date)}
+                                    </span>
+                                    <strong>{formatInr(row.amount)}</strong>
+                                </li>
+                            ))}
+                        </ul>
+                        <p className="mt-2 text-xs text-text-muted">
+                            Due now {formatInr(pending.due_now)} · Remaining {formatInr(pending.remaining)} · Total {formatInr(pending.total)}
+                        </p>
+                        <div className="mt-4 flex flex-col gap-2 sm:flex-row">
+                            <button
+                                type="button"
+                                className="w-full rounded-lg bg-action-indigo px-4 py-2.5 text-sm font-semibold text-white disabled:opacity-60 sm:w-auto"
+                                onClick={() => void confirmPlan()}
+                                disabled={confirming}
                             >
-                                <span className="material-symbols-outlined text-[18px]" aria-hidden="true">
-                                    payments
-                                </span>
-                                Pay now
-                            </a>
+                                {confirming ? "Confirming…" : "Confirm Plan"}
+                            </button>
+                            <button
+                                type="button"
+                                className="w-full rounded-lg border border-border-slate bg-surface px-4 py-2.5 text-sm font-medium hover:bg-surface-container-low disabled:opacity-60 sm:w-auto"
+                                onClick={changePlan}
+                                disabled={confirming}
+                            >
+                                Change Plan
+                            </button>
                         </div>
-                    )}
+                        {notice && <p className="mt-3 text-sm text-error">{notice}</p>}
+                    </div>
+                )}
 
-                    <form
-                        className="flex items-center gap-2 border-t border-border-slate px-4 py-3"
-                        onSubmit={(event) => {
-                            event.preventDefault();
-                            void send(draft);
-                        }}
-                    >
-                        <label className="sr-only" htmlFor="plan-message">
-                            Describe the payment plan that works for you
-                        </label>
-                        <input
-                            id="plan-message"
-                            className="min-w-0 flex-1 rounded-lg border border-border-slate bg-surface-subtle px-3 py-2 text-sm outline-none focus:border-action-indigo focus:ring-1 focus:ring-action-indigo"
-                            value={draft}
-                            onChange={(event) => setDraft(event.target.value)}
-                            placeholder={locked ? "This plan is already running." : "e.g. I can pay ₹3,000 today and the rest on Friday"}
-                            disabled={thinking || locked}
-                            autoComplete="off"
-                        />
-                        <button
-                            type="submit"
-                            className="rounded-lg bg-action-indigo px-4 py-2 text-sm font-semibold text-white disabled:opacity-60"
-                            disabled={thinking || locked || !draft.trim()}
+                {payUrl && (
+                    <div className="shrink-0 border-t border-border-slate bg-success/5 px-4 py-4">
+                        <p className="text-sm font-medium">Your plan is confirmed.</p>
+                        <p className="mt-1 text-xs text-text-muted">
+                            {emailed ? "We've emailed this payment link to you as well." : "Use the button below to pay your first installment."}
+                        </p>
+                        <a
+                            className="mt-3 inline-flex w-full items-center justify-center gap-2 rounded-lg bg-success px-4 py-2.5 text-sm font-semibold text-white sm:w-auto"
+                            href={payUrl}
+                            target="_blank"
+                            rel="noreferrer noopener"
                         >
-                            Send
-                        </button>
-                    </form>
-                </section>
+                            <span className="material-symbols-outlined text-[18px]" aria-hidden="true">
+                                payments
+                            </span>
+                            Pay now
+                        </a>
+                    </div>
+                )}
 
-                <p className="px-2 text-center text-xs text-text-muted">
-                    This link is private to you and expires. Please don't forward it.
-                </p>
+                <form
+                    className="flex shrink-0 items-center gap-2 border-t border-border-slate px-4 py-3"
+                    // Keeps the box clear of the iOS home indicator.
+                    style={{ paddingBottom: "calc(0.75rem + env(safe-area-inset-bottom))" }}
+                    onSubmit={(event) => {
+                        event.preventDefault();
+                        void send(draft);
+                    }}
+                >
+                    <label className="sr-only" htmlFor="plan-message">
+                        Describe the payment plan that works for you
+                    </label>
+                    {/* `text-base` on small screens: iOS Safari zooms into any field below
+                        16px, which shifts the whole layout sideways mid-conversation. */}
+                    <input
+                        id="plan-message"
+                        className="min-w-0 flex-1 rounded-lg border border-border-slate bg-surface-subtle px-3 py-2 text-base outline-none focus:border-action-indigo focus:ring-1 focus:ring-action-indigo sm:text-sm"
+                        value={draft}
+                        onChange={(event) => setDraft(event.target.value)}
+                        placeholder={locked ? "This plan is already running." : "e.g. I can pay ₹3,000 today and the rest on Friday"}
+                        disabled={thinking || locked}
+                        autoComplete="off"
+                    />
+                    <button
+                        type="submit"
+                        className="shrink-0 rounded-lg bg-action-indigo px-4 py-2.5 text-sm font-semibold text-white disabled:opacity-60"
+                        disabled={thinking || locked || !draft.trim()}
+                    >
+                        Send
+                    </button>
+                </form>
             </div>
         </main>
     );

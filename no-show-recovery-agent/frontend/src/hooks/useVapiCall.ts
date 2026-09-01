@@ -79,11 +79,32 @@ const IGNORED_ERROR_KEYS = new Set(["stack", "stacktrace"]);
 const ERROR_SENTENCE_KEYS = ["errorMsg", "msg", "message", "localizedMsg", "reason"];
 
 /**
+ * Read one payload field as a sentence.
+ *
+ * `message` is not always a string. A rejected `POST /call/web` answers with the
+ * provider's validation shape — `{"message": ["assistantOverrides.model.maxTokens
+ * must not be less than 50"], "error": "Bad Request", "statusCode": 400}` — and a
+ * string-only check skipped the array, so the only thing left to report was the
+ * envelope's slug `start-method-error`. That is precisely the message an operator
+ * cannot act on: it names the SDK method that failed and not the field the
+ * provider refused.
+ */
+function errorSentence(value: unknown): string {
+    if (typeof value === "string") {
+        return value.trim();
+    }
+    if (Array.isArray(value)) {
+        return value.filter((entry): entry is string => typeof entry === "string" && entry.trim() !== "").join("; ");
+    }
+    return "";
+}
+
+/**
  * Keys holding a machine slug: `type` is Daily's `DailyFatalErrorType`, `action`
  * its event name. Kept apart from the sentences so the envelope's
  * `type: "daily-error"` can never win over the `errorMsg` one level down.
  */
-const ERROR_SLUG_KEYS = ["type", "action"];
+const ERROR_SLUG_KEYS = ["type", "action", "error"];
 
 /**
  * The payload's objects, outermost first.
@@ -126,8 +147,8 @@ function errorDescriptors(payload: unknown): string[] {
     const out: string[] = [];
     for (const node of errorNodes(payload)) {
         for (const key of [...ERROR_SENTENCE_KEYS, ...ERROR_SLUG_KEYS]) {
-            const candidate = node[key];
-            if (typeof candidate === "string" && candidate.trim()) {
+            const candidate = errorSentence(node[key]);
+            if (candidate) {
                 out.push(candidate);
             }
         }
@@ -142,12 +163,13 @@ function describeVapiError(e: unknown): string {
     }
     const nodes = errorNodes(e);
     // Sentences first, across the whole payload, before settling for a slug:
-    // "Meeting has ended" one level down beats "daily-error" at the top.
+    // "Meeting has ended" one level down beats "daily-error" at the top, and the
+    // provider's rejected-field list beats "start-method-error".
     for (const keys of [ERROR_SENTENCE_KEYS, ERROR_SLUG_KEYS]) {
         for (const node of nodes) {
             for (const key of keys) {
-                const candidate = node[key];
-                if (typeof candidate === "string" && candidate.trim()) {
+                const candidate = errorSentence(node[key]);
+                if (candidate) {
                     return candidate;
                 }
             }
@@ -191,22 +213,68 @@ const FALLBACK_END_CALL_MESSAGE = "Thanks for your time. धन्यवाद, 
 /**
  * Farewells to watch for if the server sent none. Kept in sync server-side.
  *
- * The Hindi entries matter as much as the English ones: this list is matched as
- * substrings against the *transcribed* agent speech, so an English-only list
- * simply never fires on a Hindi call, and the browser's hang-up guarantee — the
- * last of the three — silently stops existing.
+ * The Hindi entries matter as much as the English ones: this list is matched
+ * against the *transcribed* agent speech, so an English-only list simply never
+ * fires on a Hindi call, and the browser's hang-up guarantee — the last of the
+ * three — silently stops existing.
+ *
+ * Every entry is leave-taking, never merely polite. A bare "धन्यवाद" used to sit
+ * here: the agent thanked a client for saying "बोलिए" and the browser cut the
+ * line two sentences into the pitch. Courtesy words are blocked outright by
+ * `FALLBACK_COURTESY_PHRASES`, and single words are refused unless they mean
+ * nothing but "this call is over".
  */
 const FALLBACK_END_CALL_PHRASES = [
     "goodbye",
     "good bye",
+    "bye for now",
     "thanks for your time",
-    "take care",
-    "धन्यवाद",
+    "thank you for your time",
+    "have a good day",
+    "have a nice day",
     "आपका दिन शुभ हो",
+    "aapka din shubh ho",
+    "फिर मिलेंगे",
+    "phir milenge",
     "अलविदा",
-    "dhanyavaad",
-    "dhanyawad",
     "alvida",
+];
+
+/**
+ * The only single words allowed to end a call. Mirrors `CLOSING_WORDS`.
+ *
+ * A one-word trigger is matched against a whole spoken line and so gets no
+ * context to disambiguate it. These three carry no meaning other than
+ * leave-taking.
+ */
+const CLOSING_WORDS = ["goodbye", "अलविदा", "alvida"];
+
+/**
+ * Politeness that must never end a call. Mirrors `COURTESY_PHRASES`.
+ *
+ * These are things the agent says *during* a call — acknowledging an answer,
+ * thanking a client for agreeing to listen. Compared as whole phrases, never as
+ * substrings, so a real closing like "thank you for your time" is unaffected
+ * while a bare "thank you" is refused.
+ */
+const FALLBACK_COURTESY_PHRASES = [
+    "धन्यवाद",
+    "शुक्रिया",
+    "जी धन्यवाद",
+    "बहुत धन्यवाद",
+    "बहुत बहुत धन्यवाद",
+    "dhanyavaad",
+    "dhanyavad",
+    "dhanyawad",
+    "shukriya",
+    "thanks",
+    "thank you",
+    "thank you so much",
+    "thanks a lot",
+    "ok thank you",
+    "okay thank you",
+    "जी",
+    "ठीक है",
 ];
 
 /**
@@ -235,6 +303,49 @@ const FALLBACK_GREETING_PHRASES = [
 const FALLBACK_END_CALL_GRACE_SECONDS = 2.5;
 
 /**
+ * Punctuation and whitespace that may sit around a farewell without changing it.
+ * Includes the Devanagari danda, which is how a Hindi sentence ends.
+ */
+const TRAILING_NOISE = " \t\r\n.,!?;:…'\"“”‘’।॥-–—";
+
+/** Lowercase, collapse whitespace, and drop surrounding punctuation. */
+function normalizePhrase(text: string): string {
+    let value = (text ?? "").toLowerCase().split(/\s+/).filter(Boolean).join(" ");
+    while (value && TRAILING_NOISE.includes(value[0]!)) {
+        value = value.slice(1);
+    }
+    while (value && TRAILING_NOISE.includes(value[value.length - 1]!)) {
+        value = value.slice(0, -1);
+    }
+    return value.trim();
+}
+
+/**
+ * Can this phrase end a call on the strength of nothing but itself?
+ *
+ * Mirrors `_is_terminal_phrase` server-side, and matters most for a
+ * dashboard-authored assistant: whatever `endCallPhrases` an operator typed into
+ * Vapi's UI arrives here, so a courtesy word configured there is filtered out
+ * before the browser can hang up on it.
+ */
+function isTerminalPhrase(phrase: string, greetings: string[]): boolean {
+    const text = normalizePhrase(phrase);
+    if (!text) {
+        return false;
+    }
+    if (greetings.some((greeting) => greeting && text.includes(normalizePhrase(greeting)))) {
+        return false;
+    }
+    if (FALLBACK_COURTESY_PHRASES.includes(text)) {
+        return false;
+    }
+    if (text.split(" ").length > 1) {
+        return true;
+    }
+    return CLOSING_WORDS.includes(text);
+}
+
+/**
  * Did the agent just close the call?
  *
  * The provider ends the call on these phrases itself, and the prompt instructs
@@ -243,21 +354,29 @@ const FALLBACK_END_CALL_GRACE_SECONDS = 2.5;
  * says goodbye and then waits is the "auto end not there" symptom. Matching the
  * transcribed farewell here gives the hang-up a third, client-side guarantee.
  *
- * Two rules, the same two the server applies: the line must contain a farewell
- * and must not be an opening. The greeting veto is not redundant with a clean
- * farewell list — this is the guarantee that fires on transcribed speech, so it
- * is the one that ends a live call, and it must not fire anywhere the server's
- * own `is_farewell` would not.
+ * Three rules, the same three the server applies, and the third is the one that
+ * keeps normal speech alive: the line must not be an opening, it must match a
+ * phrase that survives `isTerminalPhrase`, and the match must be *terminal* —
+ * the line has to END on the farewell. A farewell the agent speaks and then
+ * talks past is a figure of speech, not a hang-up. That is why
+ * "धन्यवाद. दरअसल, आपके account पर..." keeps the line open where the old
+ * substring search cut it.
  */
 function isFarewell(line: string, phrases: string[], greetings: string[]): boolean {
-    const text = line.toLowerCase();
-    if (!text.trim()) {
+    const text = normalizePhrase(line);
+    if (!text) {
         return false;
     }
-    if (greetings.some((greeting) => greeting && text.includes(greeting.toLowerCase()))) {
+    if (greetings.some((greeting) => greeting && text.includes(normalizePhrase(greeting)))) {
         return false;
     }
-    return phrases.some((phrase) => phrase && text.includes(phrase.toLowerCase()));
+    return phrases.some((phrase) => {
+        if (!isTerminalPhrase(phrase, greetings)) {
+            return false;
+        }
+        const candidate = normalizePhrase(phrase);
+        return Boolean(candidate) && text.endsWith(candidate);
+    });
 }
 
 /**
@@ -544,7 +663,10 @@ export function useVapiCall(onComplete?: () => void) {
             }
         } catch (err: any) {
             setCallState("error");
-            setErrorMsg(err.message);
+            // Read the same way the `error` event is read: a rejected
+            // `vapi.start(...)` carries the provider's own refusal, and
+            // `err.message` alone reduced a named field to a bare slug.
+            setErrorMsg(describeVapiError(err));
         }
     };
 

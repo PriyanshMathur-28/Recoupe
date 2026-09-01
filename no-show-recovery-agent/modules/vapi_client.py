@@ -121,6 +121,24 @@ MAX_CALL_SECONDS = 90
 # close itself rather than sit open to the duration cap.
 SILENCE_TIMEOUT_SECONDS = 10
 
+# The cap on one spoken reply, enforced by the provider rather than by asking the
+# model nicely. Long replies are the main source of dead air, so this sits at the
+# provider's own minimum — Vapi validates `model.maxTokens` against `minimum: 50`
+# and rejects the whole web call with HTTP 400 below it:
+#
+#     {"message": ["assistantOverrides.model.maxTokens must not be less than 50"],
+#      "error": "Bad Request", "statusCode": 400}
+#
+# That is exactly what a hand-picked 40 caused. Named here, at the floor, so the
+# next attempt to shorten replies has to go through the prompt instead of through
+# a number the API will refuse. 50 tokens is roughly two spoken seconds; the
+# prompt does the real work of keeping turns to one sentence.
+MODEL_MAX_TOKENS = 50
+
+# The floor the provider enforces. Kept beside the value it constrains so a test
+# can assert the relationship rather than restate the number.
+PROVIDER_MIN_MAX_TOKENS = 50
+
 DEFAULT_FIRST_MESSAGE = (
     "this is the accounts team about your outstanding balance. Is now a good time?"
 )
@@ -147,37 +165,81 @@ END_CALL_MESSAGE = "Thank you for your time. धन्यवाद, आपका
 # the same instant, so no single one of them failing leaves the line open.
 #
 # The Hindi entries are not a translation courtesy — they are load-bearing. All
-# three guarantees are substring matches against what the agent actually said,
-# so a farewell spoken in Devanagari matched nothing and ended nothing.
+# three guarantees match against what the agent actually said, so a farewell
+# spoken in Devanagari matched nothing and ended nothing.
 #
-# Every entry must be terminal in isolation. Substring matching cannot tell a
-# closing "नमस्ते" from an opening one, and "नमस्ते" is how the agent is told to
-# greet a Hindi speaker — so listing it here ended the call on its own first
-# word. The greeting reached all three guarantees at once and the client was hung
-# up on before they ever spoke. See :data:`GREETING_PHRASES`.
+# EVERY ENTRY MUST BE LEAVE-TAKING, NOT MERELY POLITE. This list is matched
+# against live speech, so an entry that is also an ordinary conversational word
+# hangs the call up mid-sentence:
+#
+#   * "नमस्ते" is how the agent is told to greet a Hindi speaker, so listing it
+#     ended the call on its own first word. See :data:`GREETING_PHRASES`.
+#   * "धन्यवाद" is the commonest courtesy word in Hindi. The agent thanked a
+#     client for saying "बोलिए" ("go ahead") and the line was cut two sentences
+#     into the pitch. Courtesy is not a closing: see :data:`COURTESY_PHRASES`.
+#   * "take care", "will follow up" and "will be in touch" all belong to
+#     mid-call sentences ("I will follow up with an email"), so they are gone
+#     too.
+#
+# What survives is leave-taking formulas only, and :func:`_is_terminal_phrase`
+# enforces that rather than trusting this list to stay curated.
 END_CALL_PHRASES = [
-    "goodbye",
     "good bye",
     "bye for now",
     "thanks for your time",
     "thank you for your time",
     "have a good day",
     "have a nice day",
-    "take care",
-    "will follow up",
-    "will be in touch",
-    # Hindi farewells, including the transliterations Deepgram returns when it
+    # Hindi closings, including the transliterations Deepgram returns when it
     # romanises rather than emitting Devanagari. Only unambiguous closings: the
     # full blessing "आपका दिन शुभ हो" is one, the bare "शुभ दिन" is also a
     # greeting and therefore is not.
-    "धन्यवाद",
     "आपका दिन शुभ हो",
-    "अलविदा",
+    "aapka din shubh ho",
     "फिर मिलेंगे",
-    "dhanyavaad",
-    "dhanyawad",
+    "phir milenge",
+    # The two single words that mean nothing except "this call is over".
+    "goodbye",
+    "अलविदा",
     "alvida",
 ]
+
+# The only single words allowed to end a call.
+#
+# A one-word trigger is matched against a whole spoken line, so it gets no
+# context to disambiguate it. These three carry no meaning other than
+# leave-taking — there is no sentence in a recovery pitch that contains
+# "अलविदा" and continues. Anything else that is one word long is refused
+# publication by :func:`_is_terminal_phrase`.
+CLOSING_WORDS = frozenset({"goodbye", "अलविदा", "alvida"})
+
+# Politeness, kept as an explicit blocklist for the same reason greetings are.
+#
+# These are things the agent says *during* a call: acknowledging an answer,
+# thanking a client for agreeing to listen. They are compared as whole phrases,
+# never as substrings, so "thank you for your time" — a real closing — is
+# unaffected while a bare "thank you" is refused.
+COURTESY_PHRASES = frozenset(
+    {
+        "धन्यवाद",
+        "शुक्रिया",
+        "जी धन्यवाद",
+        "बहुत धन्यवाद",
+        "बहुत बहुत धन्यवाद",
+        "dhanyavaad",
+        "dhanyavad",
+        "dhanyawad",
+        "shukriya",
+        "thanks",
+        "thank you",
+        "thank you so much",
+        "thanks a lot",
+        "ok thank you",
+        "okay thank you",
+        "जी",
+        "ठीक है",
+    }
+)
 
 # Openings, kept as an explicit blocklist rather than a comment.
 #
@@ -200,37 +262,85 @@ GREETING_PHRASES = [
     "good evening",
 ]
 
+# Punctuation and whitespace that may sit around a farewell without changing it.
+# Includes the Devanagari danda, which is how a Hindi sentence ends.
+TRAILING_NOISE = " \t\r\n.,!?;:…'\"“”‘’।॥-–—"
+
+
+def _normalize_phrase(text: str) -> str:
+    """Lowercase, collapse whitespace, and drop surrounding punctuation."""
+    lowered = " ".join(str(text or "").lower().split())
+    return lowered.strip(TRAILING_NOISE).strip()
+
 
 def _contains_greeting(text: str) -> bool:
     lowered = str(text or "").lower()
     return any(greeting in lowered for greeting in GREETING_PHRASES)
 
 
+def _is_terminal_phrase(phrase: str) -> bool:
+    """Can this phrase end a call on the strength of nothing but itself?
+
+    Three refusals, in the order they matter:
+
+    1. An opening. A closing "नमस्ते" is indistinguishable from the agent's own
+       first word.
+    2. A courtesy. "धन्यवाद" / "thank you" is said in the middle of every
+       cooperative call, so it cannot be a hang-up trigger.
+    3. Any other lone word. One word gets no context, so the bar is that it
+       means nothing except leave-taking — the closed set
+       :data:`CLOSING_WORDS`.
+
+    Everything left is a multi-word leave-taking formula, which is what makes a
+    mid-sentence courtesy incapable of cutting the line.
+    """
+    text = _normalize_phrase(phrase)
+    if not text or _contains_greeting(text):
+        return False
+    if text in COURTESY_PHRASES:
+        return False
+    if len(text.split()) > 1:
+        return True
+    return text in CLOSING_WORDS
+
+
 def terminal_phrases(phrases: Sequence[str] | None = None) -> list[str]:
     """The farewell list with anything ambiguous removed, before it is published.
 
     This is the only list that reaches the provider or the browser, so the
-    greeting blocklist is enforcement rather than documentation: a phrase added
-    to :data:`END_CALL_PHRASES` that doubles as an opening is dropped here
-    instead of ending a call on its own greeting.
+    blocklists are enforcement rather than documentation. It matters most for a
+    dashboard-authored assistant: whatever ``endCallPhrases`` an operator typed
+    into Vapi's UI, the assistant is built with *this* list as an override, so a
+    courtesy word configured there is filtered before it can end a call.
     """
     candidates = END_CALL_PHRASES if phrases is None else phrases
-    return [str(phrase) for phrase in candidates if str(phrase or "").strip() and not _contains_greeting(phrase)]
+    return [str(phrase) for phrase in candidates if _is_terminal_phrase(phrase)]
 
 
 def is_farewell(line: str, phrases: Sequence[str] | None = None) -> bool:
     """Is this spoken line the agent closing the call?
 
-    A line has to *contain* a farewell and *not* be an opening. Both halves are
-    needed: the phrase list decides what closing sounds like, and the greeting
-    blocklist stops a "नमस्ते" from qualifying no matter which list a dashboard
-    operator published. The browser applies the same two rules to the same two
-    lists, so the client-side guarantee cannot fire where this would not.
+    Three rules, and the third is the one that keeps normal speech alive:
+
+    1. The line must not be an opening.
+    2. It must match a phrase that survived :func:`_is_terminal_phrase`.
+    3. The match must be *terminal* — the line has to END on the farewell,
+       ignoring punctuation. A farewell the agent speaks and then talks past is
+       not a farewell, it is a figure of speech.
+
+    Rule 3 is why "धन्यवाद. दरअसल, आपके account पर..." keeps the line open
+    where a plain substring search cut it. The browser applies the same three
+    rules to the same lists, so the client-side guarantee cannot fire where
+    this would not.
     """
-    text = str(line or "").strip().lower()
+    text = _normalize_phrase(line)
     if not text or _contains_greeting(text):
         return False
-    return any(str(phrase or "").lower() in text for phrase in terminal_phrases(phrases))
+    for phrase in terminal_phrases(phrases):
+        candidate = _normalize_phrase(phrase)
+        if candidate and text.endswith(candidate):
+            return True
+    return False
 
 # Turn-taking, named once and applied to both assistant branches. The provider
 # defaults wait long enough after the client stops that the agent sounds like it
@@ -258,6 +368,39 @@ STOP_SPEAKING_PLAN = {
 # model said goodbye without calling the function, which is the exact failure the
 # phrase list also guards.
 AGENT_FAREWELL_GRACE_SECONDS = 2.5
+
+# The flexible-plan branch, kept as its own constant because it is the one part of
+# the prompt this project refuses to delegate. A dashboard-authored assistant is
+# published from Vapi's UI, and an operator's prompt there had no plan script at
+# all — so the live agent never asked, and `accepted_plan_offer()` in
+# ``voice_calls`` never saw an offer turn to credit a "yes" against. Both halves
+# read from this one text now.
+#
+# The condition is the whole point: the plan is offered ONLY to a client who has
+# said they cannot pay in full. It is never volunteered, never offered twice, and
+# never turned into a negotiation on the call — the agent promises an emailed link
+# and nothing else. The wording of the offer and of the yes/no question is matched
+# by ``_PLAN_OFFER_HINTS``, so changing it here means changing it there too.
+PLAN_OFFER_INSTRUCTIONS = """- If the client says they cannot pay the full amount — they have no money right
+  now, they are short, they ask to pay in instalments, or they offer part now and
+  the rest later — this is NOT a refusal. Stop asking for the full amount, and do
+  not end the call yet. Work through these steps once, in their language, one
+  short sentence per turn:
+  1. Acknowledge it in four words or fewer.
+  2. Offer the plan once: "We can arrange a customised payment plan for you."
+  3. Ask exactly one yes-or-no question, and ask it in full:
+     "Shall I email you the link to set it up?"
+     You are allowed this question even if you have already asked two.
+  4. If they say yes, say once: "I'll email you a secure link where you can
+     choose a payment plan that works for you." If they say no, accept it the
+     first time and do not ask again.
+  5. Thank them for talking and close with the closing line below.
+  Never name an amount, never name a date, never accept or refuse the schedule
+  they proposed, and never ask them to confirm an arrangement. Somebody else
+  decides what is allowed; you only promise the link.
+- Offer a payment plan only on the branch above, once the client has said they
+  cannot pay the full amount. Never volunteer one to a client who has not said
+  that, and never offer one twice."""
 
 # Written for speech, not for reading. Every rule here exists because of
 # something a real call got wrong: reciting internal case codes, saying "dollars"
@@ -289,6 +432,9 @@ How you speak — speed is the priority:
 - Use the client's first name at most twice in the whole call.
 - Do not thank the client for every single thing they say. Acknowledge and move
   the call forward.
+- The words "goodbye", "अलविदा" and "alvida" belong to your closing line and
+  nowhere else. Never say any of them mid-call, not even inside a longer
+  sentence: they hang the call up the instant you speak them.
 
 Rules you never break:
 - State the amount only if the client asks, and only the figure you were given.
@@ -301,26 +447,7 @@ Rules you never break:
   member of the team will follow up personally, and end the call politely.
 - If the client agrees to pay, confirm the day out loud once, tell them a payment
   link will arrive by email, then end the call.
-- If the client says they cannot pay the full amount — they have no money right
-  now, they are short, they ask to pay in instalments, or they offer part now and
-  the rest later — this is NOT a refusal. Stop asking for the full amount, and do
-  not end the call yet. Work through these steps once, in their language, one
-  short sentence per turn:
-  1. Acknowledge it in four words or fewer.
-  2. Offer the plan once: "We can arrange a customised payment plan for you."
-  3. Ask exactly one yes-or-no question, and ask it in full:
-     "Shall I email you the link to set it up?"
-     You are allowed this question even if you have already asked two.
-  4. If they say yes, say once: "I'll email you a secure link where you can
-     choose a payment plan that works for you." If they say no, accept it the
-     first time and do not ask again.
-  5. Thank them for talking and close with the closing line below.
-  Never name an amount, never name a date, never accept or refuse the schedule
-  they proposed, and never ask them to confirm an arrangement. Somebody else
-  decides what is allowed; you only promise the link.
-- Offer a payment plan only on the branch above, once the client has said they
-  cannot pay the full amount. Never volunteer one to a client who has not said
-  that, and never offer one twice.
+%(plan)s
 - If the client refuses outright and says nothing about money being short — it is
   not their bill, they already paid, they are simply not paying — accept it the
   first time and end the call. Do not argue, do not ask a second time, and do not
@@ -350,7 +477,11 @@ How you end the call — this is not optional:
   nothing else on this call.
 - Keep the whole call under %(seconds)d seconds. When you are close to that, close
   the call properly rather than starting another exchange.
-""" % {"closing": END_CALL_MESSAGE, "seconds": MAX_CALL_SECONDS}
+""" % {
+    "closing": END_CALL_MESSAGE,
+    "seconds": MAX_CALL_SECONDS,
+    "plan": PLAN_OFFER_INSTRUCTIONS,
+}
 
 
 class VapiConfigError(RuntimeError):
@@ -459,6 +590,54 @@ def variable_values(
     }
 
 
+def model_settings(
+    *,
+    client_name: str = "",
+    amount: float | None = None,
+    condition: str = "",
+) -> dict[str, Any]:
+    """The model block both assistant branches send, prompt included.
+
+    Both branches share this because the prompt is not something an operator may
+    author away. A dashboard-published assistant kept its prompt in Vapi's UI, and
+    the one in production had no flexible-plan branch — so a client who said they
+    had no money was never asked whether to email the plan link, and
+    :func:`voice_calls.accepted_plan_offer` had no offer turn to credit their "yes"
+    against. Overriding ``model`` closes that gap the same way ``endCallPhrases``
+    closes the hang-up gap: the guarantee ships from the code, not from the UI.
+
+    The case facts are appended as plain sentences rather than left to
+    ``{{mustache}}`` variables, because this text replaces the dashboard prompt and
+    can no longer rely on the dashboard's own placeholders. ``variableValues`` is
+    still sent alongside, so a template a first message still references keeps
+    rendering.
+    """
+    greeting_name = str(client_name or "there").strip() or "there"
+    amount_line = (
+        f"The outstanding amount is {amount:.0f} rupees." if amount else "The outstanding amount is on file."
+    )
+    return {
+        "provider": "openai",
+        "model": "gpt-4o-mini",
+        # Near-deterministic: this call has one job and no room for
+        # improvisation, and lower temperature also returns sooner.
+        "temperature": 0.2,
+        # At the provider floor; see MODEL_MAX_TOKENS for why it cannot go lower.
+        "maxTokens": MODEL_MAX_TOKENS,
+        "messages": [
+            {
+                "role": "system",
+                "content": (
+                    f"{ASSISTANT_SYSTEM_PROMPT}\n"
+                    f"Client name: {greeting_name}.\n"
+                    f"{amount_line}\n"
+                    f"Reason the balance is outstanding: {condition or 'unpaid balance'}."
+                ),
+            }
+        ],
+    }
+
+
 def build_assistant(
     settings: dict[str, Any],
     *,
@@ -476,9 +655,13 @@ def build_assistant(
 
     The shape returned is what both the web SDK and the REST API accept:
     ``{"assistantId": ..., "assistantOverrides": {...}}`` or
-    ``{"assistant": {...}}``. The overrides ride along with the reference branch
-    because a dashboard-authored prompt is the one that needs its variables
-    filled; the inline prompt below already has the case baked into its text.
+    ``{"assistant": {...}}``.
+
+    Both branches send the same :func:`model_settings`, so both speak the same
+    prompt. What "dashboard-authored" now means is the voice, the first message and
+    the transcriber configured in Vapi's UI — not the script. The script, the
+    hang-up and the turn-taking are guarantees this project makes on every call,
+    and an operator editing the UI cannot silently drop any of them.
     """
     if settings["assistant_id"]:
         return {
@@ -489,6 +672,15 @@ def build_assistant(
                     client_name=client_name,
                     amount=amount,
                     last_activity=last_activity,
+                ),
+                # The prompt is not delegated to Vapi's UI. An operator-authored
+                # prompt had no flexible-plan branch in it, so the live agent never
+                # asked a client who said they had no money whether to email the
+                # plan link — and `accepted_plan_offer()` never saw an offer turn to
+                # credit their "yes" against. The plan offer is a product guarantee,
+                # exactly like hanging up, so it ships from here.
+                "model": model_settings(
+                    client_name=client_name, amount=amount, condition=condition
                 ),
                 # A dashboard-authored assistant has its own prompt, but hanging
                 # up is behaviour this project guarantees rather than delegates.
@@ -505,37 +697,14 @@ def build_assistant(
             },
         }
     greeting_name = client_name or "there"
-    amount_line = (
-        f"The outstanding amount is {amount:.0f} rupees." if amount else "The outstanding amount is on file."
-    )
     assistant: dict[str, Any] = {
         "name": "Recovery Agent",
         # The greeting is one clause and starts with the name, because a long
         # opening sentence is what the transcriber garbled into "Kai <name>".
         "firstMessage": f"Hi {greeting_name}, {DEFAULT_FIRST_MESSAGE}",
-        "model": {
-            "provider": "openai",
-            "model": "gpt-4o-mini",
-            # Near-deterministic: this call has one job and no room for
-            # improvisation, and lower temperature also returns sooner.
-            "temperature": 0.2,
-            # A cap on the reply, enforced by the provider rather than by asking
-            # the model nicely. Long replies are the main source of dead air, and
-            # one short sentence never needs more than this. 40 tokens is roughly
-            # two spoken seconds — past that the model is padding.
-            "maxTokens": 40,
-            "messages": [
-                {
-                    "role": "system",
-                    "content": (
-                        f"{ASSISTANT_SYSTEM_PROMPT}\n"
-                        f"Client name: {greeting_name}.\n"
-                        f"{amount_line}\n"
-                        f"Reason the balance is outstanding: {condition or 'unpaid balance'}."
-                    ),
-                }
-            ],
-        },
+        "model": model_settings(
+            client_name=client_name, amount=amount, condition=condition
+        ),
         # nova-3 handles Indian-English names and code-switching markedly better
         # than nova-2, which is what mangled "Hi Aditya" and "Aditya" itself.
         "transcriber": {"provider": "deepgram", "model": "nova-3", "language": "en"},
