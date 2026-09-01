@@ -26,10 +26,12 @@ from modules.voice_calls import (
     classify_reply,
     close_call,
     decide_follow_up_email,
+    detect_plan_request,
     extract_final_answer,
     follow_up_email_for_call,
     get_call,
     heuristic_final_answer,
+    heuristic_plan_request,
     latest_call_placed_at,
     latest_email_sent_at,
     open_call,
@@ -1390,6 +1392,90 @@ def test_web_call_payload_carries_only_the_public_key(paths, monkeypatch):
     assert "sk_must_not_leak" not in serialized
     # The row id travels in metadata so the server-push report can find it.
     assert result["web"]["metadata"]["call_log_id"] == result["call"]["id"]
+
+
+# ---------------------------------------------------------------------------
+# "I have no money" is an opening for a plan, not a refusal
+#
+# The failure these cover was end to end: a client who said they had no money
+# was classified as a flat refusal, so no plan was requested, the full-amount
+# link was blocked for a declined outcome, the client received nothing at all,
+# and the agent hung up on them. Inability to pay in full and refusal to pay
+# are different answers and must stay different here.
+# ---------------------------------------------------------------------------
+
+
+_NO_MONEY = (
+    "Agent: Can you clear the balance today?\nClient: I have no money right now.",
+    "Agent: Aaj payment ho jayega?\nClient: अभी पैसे नहीं हैं",
+    "Agent: Aaj payment ho jayega?\nClient: madam abhi paise nahi hain",
+)
+
+_FLAT_REFUSALS = (
+    "Agent: Can you pay today?\nClient: I am not paying, this is not my bill.",
+    "Agent: Can you pay today?\nClient: I already paid this.",
+    "Agent: Can you pay today?\nClient: Wrong number, not interested.",
+    "Agent: Aaj payment?\nClient: मैं payment नहीं करूंगा.",
+)
+
+
+@pytest.mark.parametrize("transcript", _NO_MONEY)
+def test_having_no_money_is_read_as_asking_for_a_plan(transcript):
+    assert heuristic_plan_request(transcript)["requested"] is True
+
+
+@pytest.mark.parametrize("transcript", _NO_MONEY)
+def test_having_no_money_is_never_filed_as_a_refusal(transcript):
+    assert heuristic_final_answer(transcript)["kind"] != "refused"
+
+
+@pytest.mark.parametrize("transcript", _FLAT_REFUSALS)
+def test_a_refusal_that_never_mentions_money_is_still_a_refusal(transcript):
+    assert heuristic_final_answer(transcript)["kind"] == "refused"
+    assert heuristic_plan_request(transcript)["requested"] is False
+
+
+def test_an_escalation_still_outranks_the_plan_reading():
+    transcript = "Agent: Can you pay?\nClient: I want a manager, this is harassment."
+    assert heuristic_final_answer(transcript)["kind"] == "needs_human"
+
+
+def test_the_client_is_quoted_asking_for_the_plan():
+    """The quote becomes the chatbot's opening hint, so it must be the client's
+    own sentence rather than a summary of it."""
+    request = heuristic_plan_request(_NO_MONEY[0])
+    assert "no money" in request["client_words"].lower()
+
+
+def test_an_agent_only_call_still_asks_for_nothing():
+    result = detect_plan_request(
+        "Agent: Namaste.\nAgent: Are you there?",
+        caller=lambda _: pytest.fail("a model must not be consulted here"),
+    )
+    assert result["requested"] is False
+    assert result["source"] == "no_client_speech"
+
+
+# ---------------------------------------------------------------------------
+# The prompt has to offer the plan before it closes
+# ---------------------------------------------------------------------------
+
+
+def test_the_prompt_offers_a_plan_instead_of_hanging_up_on_no_money():
+    prompt = vapi_client.ASSISTANT_SYSTEM_PROMPT
+    assert "customised payment plan" in prompt
+    assert "Shall I email you the link to set it up?" in prompt
+    # The one question the agent is allowed past its own question budget: the
+    # user's complaint was that the call ended without ever being asked.
+    assert "even if you have already asked two" in prompt
+    # And the branch must still be gated on the client saying it first.
+    assert "Never volunteer one to a client who has not said" in prompt
+
+
+def test_the_prompt_still_refuses_to_argue_with_a_real_refusal():
+    prompt = vapi_client.ASSISTANT_SYSTEM_PROMPT
+    assert "accept it the\n  first time and end the call" in prompt
+    assert "do not\n  offer a plan" in prompt
 
 
 # ---------------------------------------------------------------------------

@@ -68,6 +68,28 @@ export interface AuditEvent {
     actor?: string;
 }
 
+/** Lifecycle of a flexible payment plan, mirrored from `flexible_plans.PLAN_STATUSES`. */
+export type PlanStatus =
+    | "invited"
+    | "negotiating"
+    | "confirmed"
+    | "link_sent"
+    | "active"
+    | "completed"
+    | "expired"
+    | "cancelled";
+
+/** One installment of a confirmed plan, as stored on the plan row. */
+export interface PlanInstallment {
+    index: number;
+    amount: number;
+    due_date: string;
+    status?: string;
+    paid_at?: string;
+    link_id?: string;
+    link_url?: string;
+}
+
 /** One row of GET /api/clients. */
 export interface Client {
     client_id: string;
@@ -103,6 +125,23 @@ export interface Client {
     amount_recovered?: number | null;
     /** ISO timestamp of the confirmed recovery event. */
     recovered_at?: string | null;
+    /**
+     * Flexible payment plan facts, present only when this case has a plan.
+     * A plan is extra information about an existing case, never a case of its
+     * own, so every field here is absent (`""`, `0`, `[]`, `null`) otherwise.
+     */
+    plan_status?: PlanStatus | "";
+    /** Operator-facing label, e.g. "Payment Plan Active". Already display copy. */
+    plan_outcome?: string;
+    /** One-line schedule, e.g. "Rs 3,000 today + Rs 7,000 Sep 4". */
+    plan_summary?: string;
+    plan_installments?: PlanInstallment[];
+    plan_installments_paid?: number;
+    plan_installment_count?: number;
+    plan_next_due_date?: string;
+    plan_next_amount?: number | null;
+    /** Still owed on the plan (INR). Null when the case has no plan. */
+    amount_remaining?: number | null;
     /** True when the 24-hour retry cooldown is still active. */
     cooldown_active?: boolean;
     /** ISO timestamp when the cooldown window lifts. */

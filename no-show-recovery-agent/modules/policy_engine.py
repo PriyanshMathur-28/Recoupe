@@ -33,9 +33,10 @@ from __future__ import annotations
 import hashlib
 import json
 import math
+import os
 import sqlite3
 from dataclasses import dataclass, field
-from datetime import datetime, time, timedelta, timezone
+from datetime import date, datetime, time, timedelta, timezone
 from pathlib import Path
 from typing import Any
 from zoneinfo import ZoneInfo
@@ -72,6 +73,35 @@ MAX_RECOVERY_WINDOW_DAYS = 14
 # Retry ladder measured from the preceding successful attempt: ~24h, 72h, 7d.
 RETRY_LADDER_HOURS = (24, 72, 168)
 
+# --- Flexible payment plan rules (merchant-configured defaults) --------------
+# A customer proposes an installment schedule conversationally in the chatbot,
+# but the conversation has no authority: only ``evaluate_plan_schedule()`` below
+# decides whether a schedule may be confirmed. Each default is overridable per
+# deployment through the matching environment variable of the same name.
+PLAN_MAX_INSTALLMENTS = 3
+PLAN_MAX_EXTENSION_DAYS = 30
+PLAN_MIN_INSTALLMENT_AMOUNT = 500.0
+# The payment due now must clear this share of the original amount.
+PLAN_MIN_FIRST_PAYMENT_RATIO = 0.20
+# The smallest installment the payment provider will actually accept. Razorpay
+# will not mint a link below one rupee, so no policy relaxation may go under it.
+#
+# This exists because ``PLAN_MIN_INSTALLMENT_AMOUNT`` is a *cost-to-collect*
+# floor written for four-figure debts. Applied literally to a small debt it is
+# not a floor but a prohibition: on a 199 rupee balance a 500 rupee minimum
+# cannot be met by any installment, so every split was rejected and the
+# advertised "first payment of at least Rs 199" asked for the entire debt in a
+# sentence offering to divide it. The floors are therefore scaled to the debt
+# (see :func:`effective_min_installment`) rather than clamped onto it.
+PLAN_ABSOLUTE_MIN_INSTALLMENT = 1.0
+PLAN_ALLOW_PARTIAL_PAYMENT = True
+PLAN_ALLOW_FUTURE_DATES = True
+# Settling for less than the amount owed is a commercial decision, not an
+# automated one. A short schedule is rejected rather than silently discounted.
+PLAN_ALLOW_DISCOUNTS = False
+# Rounding slack when comparing a proposed schedule against the amount due.
+PLAN_TOTAL_TOLERANCE = 0.5
+
 PAYMENT_ACTIONS = frozenset({"charge_fee", "retry_payment", "resend_payment_link"})
 MESSAGE_ACTIONS = frozenset({"friendly_reminder", "firm_reminder", "final_notice", "offer_waitlist"})
 ALLOWED_ACTIONS = PAYMENT_ACTIONS | MESSAGE_ACTIONS
@@ -97,6 +127,22 @@ REASON_CODES: dict[str, str] = {
     "promise_to_pay": "Promise-to-pay recorded until {detail} — outreach suppressed",
     "duplicate_suppressed": "Already actioned this cycle under idempotency key {detail}",
     "amount_below_cost_floor": "Amount {amount} below cost-to-collect floor {threshold}",
+    # Flexible payment plan schedule gates. These are customer-facing: the
+    # chatbot reads the rendered reason back to the person who proposed the plan.
+    "plan_approved": "Plan accepted: {count} installment(s) totalling {total}",
+    "plan_empty": "No payment schedule was proposed",
+    "plan_amount_unknown": "This plan cannot be checked without the original amount due",
+    "plan_too_many_installments": "{count} installments proposed, and at most {max_count} are allowed",
+    "plan_partial_not_allowed": "Part payments are not available on this account, so the full amount is due in one payment",
+    "plan_installment_too_small": "Payment {index} of {amount} is below the {threshold} minimum for an installment",
+    "plan_first_payment_too_small": "The payment due now, {amount}, is below the {threshold} minimum first payment",
+    "plan_total_short": "The schedule totals {total}, which is short of the {required} due",
+    "plan_total_excess": "The schedule totals {total}, which is more than the {required} due",
+    "plan_invalid_date": "Payment {index} has a date that could not be read: {detail}",
+    "plan_due_date_past": "Payment {index} is dated {detail}, which has already passed",
+    "plan_dates_out_of_order": "Payment {index} is dated {detail}, which is not after the payment before it",
+    "plan_future_dates_not_allowed": "Deferred dates are not available on this account, so the full amount is due today",
+    "plan_extension_too_long": "The final payment on {detail} is {days} days away, beyond the {max_days}-day maximum",
 }
 
 
@@ -619,6 +665,344 @@ def evaluate(
     )
 
 
+# ---------------------------------------------------------------------------
+# The flexible-plan gate
+# ---------------------------------------------------------------------------
+
+def _env_int(name: str, default: int) -> int:
+    try:
+        value = int(str(os.getenv(name) or "").strip())
+    except ValueError:
+        return default
+    return value if value > 0 else default
+
+
+def _env_float(name: str, default: float) -> float:
+    try:
+        value = float(str(os.getenv(name) or "").strip())
+    except ValueError:
+        return default
+    return value if math.isfinite(value) and value >= 0 else default
+
+
+def _env_flag(name: str, default: bool) -> bool:
+    raw = str(os.getenv(name) or "").strip().lower()
+    if raw in {"true", "1", "yes", "y", "on"}:
+        return True
+    if raw in {"false", "0", "no", "n", "off"}:
+        return False
+    return default
+
+
+def plan_policy() -> dict[str, Any]:
+    """Return the merchant's flexible-plan rules as plain data.
+
+    The chatbot is told these numbers so it can negotiate inside them, and the
+    customer-facing page can display them. Reading the rules is not the same as
+    applying them: ``evaluate_plan_schedule()`` remains the only decider.
+    """
+    return {
+        "max_installments": _env_int("PLAN_MAX_INSTALLMENTS", PLAN_MAX_INSTALLMENTS),
+        "max_extension_days": _env_int("PLAN_MAX_EXTENSION_DAYS", PLAN_MAX_EXTENSION_DAYS),
+        "min_installment_amount": _env_float("PLAN_MIN_INSTALLMENT_AMOUNT", PLAN_MIN_INSTALLMENT_AMOUNT),
+        "absolute_min_installment": _env_float("PLAN_ABSOLUTE_MIN_INSTALLMENT", PLAN_ABSOLUTE_MIN_INSTALLMENT),
+        "min_first_payment_ratio": _env_float("PLAN_MIN_FIRST_PAYMENT_RATIO", PLAN_MIN_FIRST_PAYMENT_RATIO),
+        "partial_payment_allowed": _env_flag("PLAN_ALLOW_PARTIAL_PAYMENT", PLAN_ALLOW_PARTIAL_PAYMENT),
+        "future_dates_allowed": _env_flag("PLAN_ALLOW_FUTURE_DATES", PLAN_ALLOW_FUTURE_DATES),
+        "discounts_allowed": _env_flag("PLAN_ALLOW_DISCOUNTS", PLAN_ALLOW_DISCOUNTS),
+    }
+
+
+def _plan_money(value: Any) -> float:
+    """Round to whole paise; anything unreadable is zero, never an exception."""
+    try:
+        number = float(value)
+    except (TypeError, ValueError):
+        return 0.0
+    return round(number, 2) if math.isfinite(number) and number > 0 else 0.0
+
+
+def effective_min_installment(original_amount: Any, policy: dict[str, Any] | None = None) -> float:
+    """The per-installment floor actually applied to one specific debt.
+
+    ``min_installment_amount`` is a cost-to-collect figure: below it, minting and
+    chasing a payment link costs more than the installment recovers. That
+    reasoning holds for four-figure debts and collapses on small ones. A 500
+    rupee floor on a 199 rupee balance is not a floor, it is a prohibition — no
+    division of 199 can put 500 in every part, so every schedule was rejected
+    while the assistant went on inviting the customer to propose one.
+
+    The floor is therefore capped at the largest value an even split across the
+    full installment allowance could still satisfy, and never falls below what
+    the payment provider will accept. Whole rupees, because a cap of 66.33 would
+    reject the only sane three-way split of 199. On a debt large enough for the
+    configured minimum to be reachable the cap does not bind and the merchant's
+    own figure is returned unchanged.
+    """
+    rules = policy or plan_policy()
+    amount = _plan_money(original_amount)
+    configured = _plan_money(rules.get("min_installment_amount"))
+    provider_floor = _plan_money(rules.get("absolute_min_installment")) or PLAN_ABSOLUTE_MIN_INSTALLMENT
+    if amount <= 0:
+        return round(configured, 2)
+    max_count = max(int(rules.get("max_installments") or 1), 1)
+    reachable = float(math.floor(amount / max_count))
+    return round(max(min(configured, reachable), min(provider_floor, amount)), 2)
+
+
+def min_first_payment(original_amount: Any, policy: dict[str, Any] | None = None) -> float:
+    """Smallest acceptable payment-due-now for a multi-installment schedule.
+
+    Built on :func:`effective_min_installment` so the advertised figure is always
+    one the customer can actually pay while still leaving a balance to defer. It
+    can no longer equal the whole debt, which is what made the offer to split a
+    small balance self-contradicting.
+    """
+    rules = policy or plan_policy()
+    amount = _plan_money(original_amount)
+    floor = max(
+        effective_min_installment(amount, rules),
+        round(amount * float(rules.get("min_first_payment_ratio") or 0.0), 2),
+    )
+    # Never demand more than the debt itself, however the ratios are configured.
+    return round(min(floor, amount), 2) if amount > 0 else round(floor, 2)
+
+
+def _plan_date(value: Any, today: date) -> date | None:
+    """Parse one proposed due date. Blank and 'today' both mean today; None is unreadable."""
+    text = str(value or "").strip().lower()
+    if not text or text in {"today", "now", "immediately", "asap"}:
+        return today
+    if text == "tomorrow":
+        return today + timedelta(days=1)
+    for candidate in (text, text[:10]):
+        try:
+            return datetime.fromisoformat(candidate).date()
+        except ValueError:
+            continue
+    return None
+
+
+def _plan_rows(installments: Any) -> list[dict[str, Any]]:
+    """Normalize a proposed schedule to ``[{index, amount, due_date}]``, in order."""
+    rows: list[dict[str, Any]] = []
+    for item in installments if isinstance(installments, (list, tuple)) else []:
+        if not isinstance(item, dict):
+            continue
+        amount = _plan_money(item.get("amount"))
+        if amount <= 0:
+            continue
+        rows.append(
+            {
+                "index": len(rows) + 1,
+                "amount": amount,
+                "due_date": str(item.get("due_date") or "").strip(),
+            }
+        )
+    return rows
+
+
+@dataclass(frozen=True)
+class PlanVerdict:
+    """The complete, auditable verdict on one customer-proposed schedule.
+
+    ``approve`` the schedule may be confirmed and its first link created.
+    ``revise``  the schedule is outside policy; ``reason`` explains why in copy
+                the chatbot can read back verbatim so the customer can retry.
+    """
+
+    decision: str  # approve | revise
+    reason_code: str
+    reason: str
+    original_amount: float
+    installments: tuple[dict[str, Any], ...] = field(default_factory=tuple)
+    checks: tuple[PolicyCheck, ...] = field(default_factory=tuple)
+
+    @property
+    def approved(self) -> bool:
+        return self.decision == "approve"
+
+    @property
+    def total(self) -> float:
+        return round(sum(float(row.get("amount") or 0) for row in self.installments), 2)
+
+    @property
+    def due_now(self) -> float:
+        return round(float(self.installments[0].get("amount") or 0), 2) if self.installments else 0.0
+
+    @property
+    def remaining(self) -> float:
+        """Balance still owed after the first payment clears."""
+        return round(max(self.total - self.due_now, 0.0), 2)
+
+    @property
+    def shortfall(self) -> float:
+        """How far the schedule falls short of the amount due (0.0 when it does not)."""
+        return round(max(float(self.original_amount) - self.total, 0.0), 2)
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "decision": self.decision,
+            "approved": self.approved,
+            "reason_code": self.reason_code,
+            "reason": self.reason,
+            "original_amount": round(float(self.original_amount), 2),
+            "total": self.total,
+            "due_now": self.due_now,
+            "remaining": self.remaining,
+            "shortfall": self.shortfall,
+            "installments": [dict(row) for row in self.installments],
+            "checks": [check.to_dict() for check in self.checks],
+        }
+
+
+def evaluate_plan_schedule(
+    original_amount: Any,
+    installments: Any,
+    now: datetime | None = None,
+    policy: dict[str, Any] | None = None,
+) -> PlanVerdict:
+    """Gate one customer-proposed installment schedule against merchant policy.
+
+    The chatbot negotiates in prose and may propose anything; this function is
+    the only place that decides whether a schedule is valid. Like ``evaluate()``
+    it calls no LLM, sends nothing, creates no payment link and writes to no
+    store — it returns a verdict plus every gate that was evaluated.
+
+    ``installments`` is a sequence of ``{"amount": ..., "due_date": ...}``. Due
+    dates may be blank (meaning today) or ISO dates; approved verdicts always
+    carry them back as ``YYYY-MM-DD``.
+    """
+    rules = plan_policy() if policy is None else {**plan_policy(), **policy}
+    today = (now or datetime.now(timezone.utc)).astimezone(IST).date()
+    amount_due = _plan_money(original_amount)
+    rows = _plan_rows(installments)
+    checks: list[PolicyCheck] = []
+
+    def verdict(decision: str, code: str, **params: Any) -> PlanVerdict:
+        return PlanVerdict(
+            decision=decision,
+            reason_code=code,
+            reason=describe_reason(code, **params),
+            original_amount=amount_due,
+            installments=tuple(dict(row) for row in rows),
+            checks=tuple(checks),
+        )
+
+    # 1. The debt itself. Without it there is nothing to divide.
+    checks.append(PolicyCheck("plan_amount_known", amount_due > 0, f"INR {amount_due:,.2f}"))
+    if amount_due <= 0:
+        return verdict("revise", "plan_amount_unknown")
+
+    # 2. A schedule with no payable rows is not a schedule.
+    checks.append(PolicyCheck("plan_not_empty", bool(rows), f"{len(rows)} payable installment(s)"))
+    if not rows:
+        return verdict("revise", "plan_empty")
+
+    # 3. Maximum number of installments.
+    max_count = int(rules["max_installments"])
+    count_ok = len(rows) <= max_count
+    checks.append(PolicyCheck("plan_installment_count", count_ok, f"{len(rows)} of maximum {max_count}"))
+    if not count_ok:
+        return verdict("revise", "plan_too_many_installments", count=len(rows), max_count=max_count)
+
+    # 4. Whether splitting the debt at all is permitted on this account.
+    partial_ok = bool(rules["partial_payment_allowed"]) or len(rows) == 1
+    checks.append(
+        PolicyCheck(
+            "plan_partial_allowed",
+            partial_ok,
+            "part payments enabled" if partial_ok else "part payments disabled",
+        )
+    )
+    if not partial_ok:
+        return verdict("revise", "plan_partial_not_allowed")
+
+    # 5. Minimum amounts. A single payment of the whole debt is exempt: nothing
+    #    is being deferred, so a per-installment floor would be meaningless.
+    #    The floor is scaled to this debt so that a small balance stays divisible
+    #    instead of being refused by a threshold written for a large one.
+    minimum = effective_min_installment(amount_due, rules)
+    if len(rows) > 1:
+        small = next((row for row in rows if row["amount"] < minimum - 0.01), None)
+        checks.append(
+            PolicyCheck(
+                "plan_minimum_amounts",
+                small is None,
+                f"installment {small['index']} INR {small['amount']:,.2f}" if small else f"all at or above INR {minimum:,.0f}",
+            )
+        )
+        if small is not None:
+            return verdict(
+                "revise",
+                "plan_installment_too_small",
+                index=small["index"],
+                amount=f"INR {small['amount']:,.0f}",
+                threshold=f"INR {minimum:,.0f}",
+            )
+
+        first_floor = min_first_payment(amount_due, rules)
+        first_ok = rows[0]["amount"] >= first_floor - 0.01
+        checks.append(PolicyCheck("plan_first_payment", first_ok, f"INR {rows[0]['amount']:,.2f} vs INR {first_floor:,.2f}"))
+        if not first_ok:
+            return verdict(
+                "revise",
+                "plan_first_payment_too_small",
+                amount=f"INR {rows[0]['amount']:,.0f}",
+                threshold=f"INR {first_floor:,.0f}",
+            )
+
+    # 6. Dates: readable, not in the past, strictly increasing, deferral allowed.
+    allow_future = bool(rules["future_dates_allowed"])
+    previous: date | None = None
+    for row in rows:
+        due = _plan_date(row["due_date"], today)
+        if due is None:
+            checks.append(PolicyCheck("plan_due_dates", False, f"installment {row['index']} '{row['due_date']}'"))
+            return verdict("revise", "plan_invalid_date", index=row["index"], detail=row["due_date"] or "(blank)")
+        row["due_date"] = due.isoformat()
+        if due < today:
+            checks.append(PolicyCheck("plan_due_dates", False, f"installment {row['index']} {row['due_date']} before {today.isoformat()}"))
+            return verdict("revise", "plan_due_date_past", index=row["index"], detail=row["due_date"])
+        if previous is not None and due <= previous:
+            checks.append(PolicyCheck("plan_due_dates", False, f"installment {row['index']} {row['due_date']} not after {previous.isoformat()}"))
+            return verdict("revise", "plan_dates_out_of_order", index=row["index"], detail=row["due_date"])
+        if due > today and not allow_future:
+            checks.append(PolicyCheck("plan_due_dates", False, "deferred dates disabled"))
+            return verdict("revise", "plan_future_dates_not_allowed")
+        previous = due
+    checks.append(PolicyCheck("plan_due_dates", True, " → ".join(str(row["due_date"]) for row in rows)))
+
+    # 7. Maximum extension period, measured to the final installment.
+    max_days = int(rules["max_extension_days"])
+    horizon = (previous - today).days if previous is not None else 0
+    window_ok = horizon <= max_days
+    checks.append(PolicyCheck("plan_extension_window", window_ok, f"{horizon}/{max_days} days"))
+    if not window_ok:
+        return verdict(
+            "revise",
+            "plan_extension_too_long",
+            detail=rows[-1]["due_date"],
+            days=horizon,
+            max_days=max_days,
+        )
+
+    # 8. The schedule must add up to the debt. Discounts are a commercial
+    #    decision and stay off the automated path unless explicitly enabled.
+    discounts_allowed = bool(rules["discounts_allowed"])
+    total = round(sum(float(row["amount"]) for row in rows), 2)
+    short = total < amount_due - PLAN_TOTAL_TOLERANCE
+    excess = total > amount_due + PLAN_TOTAL_TOLERANCE
+    total_ok = not excess and (not short or discounts_allowed)
+    checks.append(PolicyCheck("plan_total_matches_due", total_ok, f"INR {total:,.2f} vs INR {amount_due:,.2f}"))
+    if excess:
+        return verdict("revise", "plan_total_excess", total=f"INR {total:,.0f}", required=f"INR {amount_due:,.0f}")
+    if short and not discounts_allowed:
+        return verdict("revise", "plan_total_short", total=f"INR {total:,.0f}", required=f"INR {amount_due:,.0f}")
+
+    return verdict("approve", "plan_approved", count=len(rows), total=f"INR {total:,.0f}")
+
+
 if __name__ == "__main__":
     import tempfile
 
@@ -714,6 +1098,151 @@ if __name__ == "__main__":
         ok = repeat.decision == "defer" and repeat.reason_code == "duplicate_suppressed"
         failures += 0 if ok else 1
         print(f"{'PASS' if ok else 'FAIL'} idempotency blocks a repeat in the same cycle: {repeat.decision}/{repeat.reason_code}")
+
+        # --- Flexible-plan schedule gate ---------------------------------
+        plan_cases: list[tuple[str, float, list[dict[str, Any]], str, str]] = [
+            (
+                "split plan inside policy approves",
+                10000,
+                [{"amount": 3000, "due_date": ""}, {"amount": 7000, "due_date": "2026-09-04"}],
+                "approve",
+                "plan_approved",
+            ),
+            (
+                "full amount on a future date approves",
+                10000,
+                [{"amount": 10000, "due_date": "2026-09-10"}],
+                "approve",
+                "plan_approved",
+            ),
+            (
+                "short total is not a discount",
+                10000,
+                [{"amount": 3000, "due_date": ""}, {"amount": 4000, "due_date": "2026-09-04"}],
+                "revise",
+                "plan_total_short",
+            ),
+            (
+                "too many installments rejected",
+                10000,
+                [
+                    {"amount": 2000, "due_date": ""},
+                    {"amount": 2000, "due_date": "2026-09-04"},
+                    {"amount": 3000, "due_date": "2026-09-10"},
+                    {"amount": 3000, "due_date": "2026-09-15"},
+                ],
+                "revise",
+                "plan_too_many_installments",
+            ),
+            (
+                "first payment below the floor rejected",
+                10000,
+                [{"amount": 600, "due_date": ""}, {"amount": 9400, "due_date": "2026-09-06"}],
+                "revise",
+                "plan_first_payment_too_small",
+            ),
+            (
+                "installment below the minimum rejected",
+                10000,
+                [{"amount": 9800, "due_date": ""}, {"amount": 200, "due_date": "2026-09-06"}],
+                "revise",
+                "plan_installment_too_small",
+            ),
+            (
+                "extension beyond the window rejected",
+                10000,
+                [{"amount": 3000, "due_date": ""}, {"amount": 7000, "due_date": "2026-12-01"}],
+                "revise",
+                "plan_extension_too_long",
+            ),
+            (
+                "past due date rejected",
+                10000,
+                [{"amount": 3000, "due_date": "2026-08-01"}, {"amount": 7000, "due_date": "2026-09-05"}],
+                "revise",
+                "plan_due_date_past",
+            ),
+            (
+                "out of order dates rejected",
+                10000,
+                [{"amount": 3000, "due_date": "2026-09-08"}, {"amount": 7000, "due_date": "2026-09-05"}],
+                "revise",
+                "plan_dates_out_of_order",
+            ),
+            (
+                "small debt splits into two reachable installments",
+                199,
+                [{"amount": 100, "due_date": ""}, {"amount": 99, "due_date": "2026-09-10"}],
+                "approve",
+                "plan_approved",
+            ),
+            (
+                "small debt splits across the full installment allowance",
+                199,
+                [
+                    {"amount": 67, "due_date": ""},
+                    {"amount": 66, "due_date": "2026-09-10"},
+                    {"amount": 66, "due_date": "2026-09-20"},
+                ],
+                "approve",
+                "plan_approved",
+            ),
+            (
+                "small debt still refuses a token installment",
+                199,
+                [{"amount": 50, "due_date": ""}, {"amount": 149, "due_date": "2026-09-10"}],
+                "revise",
+                "plan_installment_too_small",
+            ),
+            ("empty schedule rejected", 10000, [], "revise", "plan_empty"),
+            (
+                "unknown amount rejected",
+                0,
+                [{"amount": 3000, "due_date": ""}],
+                "revise",
+                "plan_amount_unknown",
+            ),
+        ]
+        for label, due, schedule, expected_decision, expected_code in plan_cases:
+            plan_result = evaluate_plan_schedule(due, schedule, now=daytime)
+            ok = plan_result.decision == expected_decision and plan_result.reason_code == expected_code
+            failures += 0 if ok else 1
+            print(f"{'PASS' if ok else 'FAIL'} {label}: {plan_result.decision}/{plan_result.reason_code} — {plan_result.reason}")
+
+        approved = evaluate_plan_schedule(
+            10000,
+            [{"amount": 3000, "due_date": ""}, {"amount": 7000, "due_date": "2026-09-04"}],
+            now=daytime,
+        )
+        derived_ok = (
+            approved.due_now == 3000.0
+            and approved.remaining == 7000.0
+            and approved.shortfall == 0.0
+            and approved.installments[0]["due_date"] == "2026-09-01"
+        )
+        failures += 0 if derived_ok else 1
+        print(f"{'PASS' if derived_ok else 'FAIL'} approved plan derives due now / remaining / resolved dates")
+
+        # The floors must stay exactly as configured on a debt big enough to meet
+        # them, and must never ask for the entire balance on one too small to.
+        large_unchanged = (
+            effective_min_installment(10000) == PLAN_MIN_INSTALLMENT_AMOUNT
+            and min_first_payment(10000) == 2000.0
+        )
+        failures += 0 if large_unchanged else 1
+        print(f"{'PASS' if large_unchanged else 'FAIL'} configured floors unchanged on a large debt")
+
+        small_floor = min_first_payment(199)
+        small_divisible = (
+            0 < effective_min_installment(199) < 199
+            and 0 < small_floor < 199
+            and small_floor >= PLAN_ABSOLUTE_MIN_INSTALLMENT
+        )
+        failures += 0 if small_divisible else 1
+        print(
+            f"{'PASS' if small_divisible else 'FAIL'} small debt keeps a reachable first payment: "
+            f"INR {small_floor:,.2f} of INR 199"
+        )
 
         if failures:
             raise SystemExit(1)

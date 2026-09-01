@@ -901,7 +901,19 @@ def heuristic_final_answer(transcript: str, classification: dict[str, Any] | Non
 
     if not lines:
         return answer("unclear", "The client's own words were not captured on this call.", 0.3)
+    # "I have no money" reads as a refusal word-for-word and is not one: the
+    # client is unable to pay in full, which is the opening for a plan rather
+    # than a refusal to engage. Where the same sentence trips both lists the
+    # inability wins, and it is reported as unsettled rather than refused —
+    # whether a plan was actually requested is :func:`detect_plan_request`'s
+    # question, not this one's.
     if any(hint in haystack for hint in _FINAL_REFUSE_HINTS):
+        if any(hint in haystack for hint in _PLAN_REQUEST_HINTS):
+            return answer(
+                "unclear",
+                "The client said they cannot pay the full amount right now.",
+                0.5,
+            )
         return answer("refused", "The client refused to pay or disputed the amount.", 0.75)
     if any(hint in haystack for hint in _FINAL_HUMAN_HINTS):
         return answer("needs_human", "The client raised something that needs a person, not a link.", 0.75)
@@ -1052,13 +1064,25 @@ Rules that override everything above:
 # Deterministic hints for the fallback, in both English and Hindi, for the same
 # reason the final-answer hints are bilingual: the assistant speaks whichever
 # language the client does, and the fallback must not be blind in one of them.
-# Every Hindi entry here carries its qualifier ("पूरे पैसे नहीं", not "पैसे
-# नहीं") so that a flat refusal is not read as a request to split.
+#
+# "I have no money" is included deliberately, in both languages and without a
+# qualifier. It is the single most common way a client asks for a different shape
+# of payment, and treating it as a flat refusal was the whole bug: the client was
+# sent nothing and the call was closed on them. Inability to pay is an opening
+# for a plan, not a refusal to engage.
+#
+# What still must NOT match is a refusal that never mentions money at all — "I am
+# not paying", "this is not my bill", "I already paid". None of the phrases below
+# appear in those, so the flat-refusal case stays intact.
 _PLAN_REQUEST_HINTS = (
     "can't pay the full", "cannot pay the full", "can't pay full", "cannot pay full",
     "can't pay it all", "can't pay everything", "can't pay the whole",
     "can't afford", "cannot afford", "don't have enough", "do not have enough",
     "not enough money", "short of money", "short on money", "tight right now",
+    "no money", "don't have money", "do not have money", "dont have money",
+    "have no money", "haven't got money", "havent got money", "out of money",
+    "money problem", "money is tight", "financial problem", "no funds",
+    "can't pay right now", "cannot pay right now", "can't pay today",
     "installment", "installments", "instalment", "instalments", "emi",
     "in parts", "part payment", "partial payment", "split the payment", "split it",
     "some now", "some amount now", "pay some", "half now", "rest later",
@@ -1066,6 +1090,15 @@ _PLAN_REQUEST_HINTS = (
     "पूरा नहीं", "पूरे पैसे नहीं", "इतने पैसे नहीं", "पैसे कम", "किस्त", "किश्त",
     "किस्तों", "किश्तों", "थोड़े पैसे", "थोड़ा अभी", "आधा अभी", "बाकी बाद",
     "बाकी में", "टुकड़ों", "ईएमआई", "एक साथ नहीं",
+    "पैसे नहीं", "पैसा नहीं", "पैसे नहीं हैं", "पैसा नहीं है", "पैसे खत्म",
+    "तंगी", "दिक्कत है पैसे", "अभी नहीं दे सकता", "अभी नहीं दे सकती",
+    # Romanised Hinglish, because the transcriber returns whichever script it
+    # heard and a client who says "paise nahi hain" asked for exactly the same
+    # thing as one who says "पैसे नहीं हैं".
+    "paise nahi", "paise nahin", "paisa nahi", "paisa nahin", "paise kam",
+    "paise nai", "poore paise nahi", "pura nahi", "puura nahi", "ek saath nahi",
+    "kist", "kisht", "kiston", "kishton", "thoda abhi", "aadha abhi",
+    "baaki baad", "baki baad", "abhi nahi de sakta", "abhi nahi de sakti",
 )
 
 # ISO-looking dates are removed before scanning for money so that "pay on

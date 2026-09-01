@@ -1,14 +1,25 @@
 /**
- * First-run gate for the recovery console.
+ * First-run gate for the recovery console, in two steps.
  *
- * The dashboard renders no data from any pre-seeded database. Every session
- * begins by uploading the operator's own recovery-case CSV, which becomes the
- * single source of truth for every metric, case, and analysis in the console.
- * This screen documents the exact CSV schema so a correct file can be prepared
- * without guesswork, and surfaces per-row validation errors when one is wrong.
+ * Step 1 — the recovery-case CSV. The dashboard renders no data from any
+ * pre-seeded database. Every session begins by uploading the operator's own
+ * cases, which become the single source of truth for every metric, case, and
+ * analysis in the console. This screen documents the exact schema so a correct
+ * file can be prepared without guesswork, and surfaces per-row validation
+ * errors when one is wrong.
+ *
+ * Step 2 — the business document. The CSV says who owes what; it says nothing
+ * about what the business actually is. Whatever the operator writes here is
+ * quoted to the payment-plan chatbot that customers reach from their recovery
+ * email, so it can answer "what was this charge for?" in the merchant's own
+ * words instead of deflecting. It is reference material for a prompt and
+ * nothing more: the deterministic policy engine never reads it, so nothing
+ * written here can widen an installment limit or authorise a discount. That is
+ * also why this step is optional — skipping it costs the chatbot context, not
+ * correctness — while the CSV is not.
  */
 import { useCallback, useRef, useState } from "react";
-import { ApiError, uploadRecoveryCsv } from "../api";
+import { ApiError, saveBusinessProfile, uploadBusinessProfile, uploadRecoveryCsv } from "../api";
 
 const Icon = ({ children, className = "" }: { children: string; className?: string }) => (
     <span className={`material-symbols-outlined ${className}`} aria-hidden="true">
@@ -63,6 +74,32 @@ const SAMPLE_CSV = [
 
 /** A header-only template operators can download, fill in, and re-upload. */
 const TEMPLATE_CSV = `${CSV_HEADER}\n`;
+
+/** The shortest document worth storing, mirroring the server's own floor. */
+const MIN_PROFILE_CHARS = 20;
+
+/**
+ * What to write in the business document, phrased as the questions a customer
+ * short of money actually asks. Prompts, not a schema: the text is read by a
+ * language model, so prose is the correct format.
+ */
+const PROFILE_PROMPTS: string[] = [
+    "What the business is and what customers are paying for.",
+    "What this specific charge covers — a session, a month's membership, a delivery.",
+    "How billing normally works: when charges fall, what a renewal looks like.",
+    "What you are happy for a customer to be told about rescheduling or pausing.",
+    "Anything a customer commonly misunderstands about the charge.",
+];
+
+const PROFILE_EXAMPLE = `Peak Fitness is a strength-training studio in Pune. Members pay a monthly
+fee of Rs 1,499 that covers unlimited classes and one coaching session.
+
+Billing runs on the 1st of each month. A failed charge usually means an expired
+card rather than a cancelled membership, and the membership stays active while
+we sort it out.
+
+Members may pause for one month a year at no cost, and may move a coaching
+session with 12 hours' notice.`;
 
 function SchemaTable({ title, rows }: { title: string; rows: SchemaColumn[] }) {
     return (

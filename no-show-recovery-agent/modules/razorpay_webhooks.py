@@ -171,6 +171,12 @@ def normalize_webhook(payload: dict[str, Any], event_id: str | None = None) -> d
 
     ``event_id`` is Razorpay's delivery identity and is deliberately kept
     separate from the payment-link and customer identifiers in the payload.
+
+    ``flexible_plan_id``/``flexible_plan_installment`` are carried through from
+    the link's notes (see :func:`modules.flexible_plans.link_notes`). They are
+    the only thread tying an installment payment back to the plan that minted
+    its link, and therefore back to the ORIGINAL recovery case — the plan link
+    is otherwise indistinguishable from an ordinary ``resend_payment_link``.
     """
     event_name = str(payload.get("event") or "")
     normalized_event_id = str(event_id or "").strip()
@@ -218,6 +224,8 @@ def normalize_webhook(payload: dict[str, Any], event_id: str | None = None) -> d
         "payment_link_id": entity.get("id") if entity_key == "payment_link" else notes.get("payment_link_id"),
         "payment_status": payment_status,
         "recovery_action": action,
+        "flexible_plan_id": str(notes.get("flexible_plan_id") or "").strip(),
+        "flexible_plan_installment": str(notes.get("flexible_plan_installment") or "").strip(),
         "amount": amount_inr,
         "amount_paid": amount_inr,
         "amount_due": max(total_amount_inr - amount_inr, 0.0),
@@ -228,6 +236,75 @@ def normalize_webhook(payload: dict[str, Any], event_id: str | None = None) -> d
     }
 
 
+def credit_plan_installment(
+    normalized: dict[str, Any],
+    audit_path: Path = AUDIT_PATH,
+    plan_path: Path | None = None,
+) -> dict[str, Any] | None:
+    """Credit one flexible-plan installment from a confirmed payment.
+
+    Returns the credit result, or ``None`` when this payment does not belong to a
+    plan. Called only after :func:`record_once` has accepted the delivery, so the
+    provider's own retries cannot double-credit; a second, independent guard
+    lives in ``plan_payment.payment_id``.
+
+    Deliberately never raises. A plan we cannot credit must not stop the
+    surrounding recovery record from being written — the money did arrive, and
+    the ORIGINAL case must reflect it either way. Failures are audited instead.
+    """
+    from .flexible_plans import PLAN_DB_PATH, find_plan_for_payment, record_installment_payment
+
+    store = plan_path or PLAN_DB_PATH
+    try:
+        plan = find_plan_for_payment(
+            normalized.get("flexible_plan_id"),
+            link_id=str(normalized.get("payment_link_id") or ""),
+            path=store,
+        )
+    except Exception:  # noqa: BLE001 - a lookup failure is not a payment failure
+        plan = None
+    if plan is None:
+        return None
+
+    try:
+        result = record_installment_payment(
+            int(plan["id"]),
+            payment_id=str(normalized.get("payment_id") or normalized.get("event_id") or ""),
+            amount=normalized.get("amount_paid") or normalized.get("amount") or 0,
+            link_id=str(normalized.get("payment_link_id") or ""),
+            path=store,
+        )
+    except Exception as exc:  # noqa: BLE001 - audit it; never fail the webhook
+        log_event(
+            normalized, "flexible_plan_credit_failed", None, str(normalized.get("payment_status") or ""),
+            audit_path, errors=[str(exc)], outcome="plan_credit_failed", actor="webhook_ingestion",
+        )
+        return None
+
+    if result["duplicate"]:
+        return result
+
+    updated = result["plan"]
+    installment = result["installment"] or {}
+    log_event(
+        {
+            **normalized,
+            "flexible_plan_id": str(updated["id"]),
+            "flexible_plan_installment": str(installment.get("index") or ""),
+            "plan_summary": updated["plan_summary"],
+            "amount_paid": updated["amount_paid"],
+            "amount_due": updated["amount_remaining"],
+        },
+        "flexible_plan_installment_paid",
+        f"Installment {installment.get('index') or '?'} paid; {updated['plan_summary']}",
+        "recovered" if result["completed"] else "partially_paid",
+        audit_path,
+        outcome="plan_completed" if result["completed"] else "payment_plan_active",
+        actor="webhook_ingestion",
+    )
+    return result
+
+
 def ingest_webhook(
     body: bytes | str,
     signature: str,
@@ -236,6 +313,7 @@ def ingest_webhook(
     webhook_path: Path = WEBHOOK_DB_PATH,
     audit_path: Path = AUDIT_PATH,
     recovery_path: Path = RECOVERY_DB_PATH,
+    plan_path: Path | None = None,
 ) -> dict[str, Any]:
     """Verify, deduplicate, normalize, and audit one Razorpay webhook delivery.
 
@@ -244,6 +322,10 @@ def ingest_webhook(
     audit row, while invalid signatures are rejected before payload parsing.
     On a confirmed payment (payment_link.paid or payment.captured), a recovery
     record is written so the dashboard can show real recovered amounts.
+
+    A payment whose notes carry ``flexible_plan_id`` also credits that
+    installment, through the SAME recovery record and the same ``client_id``, so
+    a plan payment settles the original case rather than opening a new one.
     """
     if not str(event_id or "").strip():
         raise ValueError("Razorpay webhook event_id is required")
@@ -291,8 +373,14 @@ def ingest_webhook(
     if not record_once(event_id, event_name, payload, webhook_path):
         return {"duplicate": True, "event_id": event_id, "event": normalized}
     row = log_event(normalized, normalized["recovery_action"], None, normalized["payment_status"], audit_path, actor="webhook_ingestion")
+    plan_credit: dict[str, Any] | None = None
     # Write a durable recovery record so the dashboard shows confirmed amounts.
     if normalized.get("payment_status") == "recovered" and normalized.get("client_id"):
+        # An installment payment is credited to its plan FIRST, then falls through
+        # to the ordinary recovery record below. Both use the same client_id, which
+        # is what keeps a plan payment attributed to the original voice case
+        # instead of opening a disconnected one.
+        plan_credit = credit_plan_installment(normalized, audit_path=audit_path, plan_path=plan_path)
         # Attribution is decided HERE, once, at the moment payment is confirmed:
         # the newest call attempt is compared against the newest confirmed email
         # send, and whichever acted last gets the credit. Both the winning channel
@@ -318,7 +406,7 @@ def ingest_webhook(
             recovered_via=recovered_via,
             recovery_triggered_at=recovery_triggered_at,
         )
-    return {"duplicate": False, "event_id": event_id, "event": normalized, "audit": row}
+    return {"duplicate": False, "event_id": event_id, "event": normalized, "audit": row, "plan_credit": plan_credit}
 
 
 def simulate_paid_webhook(

@@ -64,11 +64,27 @@ async function request<T>(url: string, init?: RequestInit): Promise<T> {
 /** One row per client: current condition plus confirmed email status. */
 export const fetchClients = (): Promise<Client[]> => request<Client[]>("/api/clients");
 
+/**
+ * What the merchant told us about their own business, in summary.
+ *
+ * Held separately from `ready` on purpose: the console opens on the recovery CSV
+ * alone. This document only changes how the emailed payment-plan chatbot talks
+ * to a customer — it can never change what the policy engine accepts.
+ */
+export interface BusinessProfileStatus {
+    ready: boolean;
+    source_name: string;
+    saved_at: string | null;
+    characters: number;
+    preview: string;
+}
+
 /** Summary of the recovery data currently loaded into the dashboard. */
 export interface DataStatus {
     ready: boolean;
     row_count: number;
     uploaded_at: string | null;
+    business?: BusinessProfileStatus;
 }
 
 /** Report whether a recovery CSV has been ingested for this session. */
@@ -80,6 +96,20 @@ export const uploadRecoveryCsv = (file: File): Promise<DataStatus> => {
     form.append("file", file);
     return request<DataStatus>("/api/upload-csv", { method: "POST", body: form });
 };
+
+/** Store the merchant's business description as a file upload. */
+export const uploadBusinessProfile = (file: File): Promise<BusinessProfileStatus> => {
+    const form = new FormData();
+    form.append("file", file);
+    return request<BusinessProfileStatus>("/api/merchant-profile", { method: "POST", body: form });
+};
+
+/** Store the merchant's business description as typed text. */
+export const saveBusinessProfile = (text: string): Promise<BusinessProfileStatus> =>
+    request<BusinessProfileStatus>("/api/merchant-profile", {
+        method: "POST",
+        body: JSON.stringify({ text }),
+    });
 
 /** Deliver the client's current case; `resend` overrides the already-sent guard. */
 export const sendClientEmail = (clientId: string, resend = false): Promise<Client> =>

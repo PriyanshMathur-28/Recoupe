@@ -15,6 +15,14 @@ from batch_runner import run_batch
 from modules.audit_log import AUDIT_PATH
 from modules.attempt_tracker import DB_PATH as ATTEMPTS_DB_PATH
 from modules.detector import RECOVERY_CASES_PATH
+from modules.flexible_plans import PLAN_DB_PATH
+from modules.merchant_profile import (
+    ProfileError,
+    clear_profile,
+    decode_upload,
+    profile_status,
+    save_profile,
+)
 from modules.payments import PaymentLinkProviderError
 from modules.razorpay_webhooks import ingest_webhook, simulate_paid_webhook
 from modules.revenue_autopsy import analyze as analyze_revenue, build_context as build_revenue_context
@@ -551,12 +559,17 @@ def data_status_api():
 
     The dashboard requires the operator to upload their own case data before any
     metrics are shown; nothing is served from a pre-seeded database.
+
+    ``business`` reports the merchant document that follows the CSV. It is not
+    part of ``ready``: the dashboard opens on the case data alone, because the
+    document only changes how the plan chatbot talks, never what it decides.
     """
     uploaded_at = session.get("data_uploaded_at")
     return jsonify({
         "ready": bool(uploaded_at),
         "row_count": _recovery_row_count() if uploaded_at else 0,
         "uploaded_at": uploaded_at,
+        "business": profile_status(),
     })
 
 
@@ -611,7 +624,57 @@ def upload_csv_api():
         "ready": True,
         "row_count": _recovery_row_count(),
         "uploaded_at": session["data_uploaded_at"],
+        "business": profile_status(),
     })
+
+
+# ---------------------------------------------------------------------------
+# The merchant's business document
+#
+# Step two of the upload gate. The recovery CSV says who owes what; this says
+# what the business is, so the plan chatbot can answer "what was this charge
+# for?" in the merchant's own words instead of deflecting. It is reference prose
+# for a prompt and nothing else: policy_engine never reads it, so no wording an
+# operator puts here can widen an installment limit or authorise a discount.
+# ---------------------------------------------------------------------------
+
+
+@app.get("/api/merchant-profile")
+def merchant_profile_api():
+    """Report whether a business document exists, without returning all of it."""
+    return jsonify(profile_status())
+
+
+@app.post("/api/merchant-profile")
+def save_merchant_profile_api():
+    """Store the merchant's business description, uploaded as a file or typed in."""
+    if (denied := _require_mutation_access()) is not None:
+        return denied
+
+    upload = request.files.get("file")
+    if upload is not None and (upload.filename or "").strip():
+        try:
+            text = decode_upload(upload.read(), upload.filename)
+        except ProfileError as exc:
+            return jsonify({"error": str(exc)}), 400
+    else:
+        payload = request.get_json(silent=True) or request.form or {}
+        text = str(payload.get("text") or "")
+
+    try:
+        saved = save_profile(text, source_name=(upload.filename if upload else "pasted text"))
+    except ProfileError as exc:
+        return jsonify({"error": str(exc)}), 400
+    return jsonify({"saved": True, **saved})
+
+
+@app.delete("/api/merchant-profile")
+def clear_merchant_profile_api():
+    """Forget the stored document, so the chatbot stops quoting it."""
+    if (denied := _require_mutation_access()) is not None:
+        return denied
+    clear_profile()
+    return jsonify({"saved": False, **profile_status()})
 
 
 @app.get("/api/revenue-autopsy/context")
@@ -791,6 +854,161 @@ def voice_complete_call_api():
     except Exception as exc:
         return jsonify({"error": str(exc)}), 400
     return jsonify(result)
+
+
+# ---------------------------------------------------------------------------
+# Flexible payment plan: the customer's own chatbot page
+#
+# These four routes are the only ones in this file that are NOT for an operator.
+# They are reached by a customer who has no dashboard session, so the bearer
+# token in the URL is the whole of their authorisation: it resolves to exactly
+# one plan (and therefore one recovery case), only its SHA-256 hash is stored,
+# and it expires. There is deliberately no CSRF token, because there is no
+# session or cookie to forge a request against — every request must carry the
+# secret itself. Nothing here reads or writes another case, and nothing here
+# returns operator-facing state.
+# ---------------------------------------------------------------------------
+
+
+def _plan_for_token(token: str):
+    """Resolve a customer's bearer token to their plan, or an error response.
+
+    ``PLAN_DB_PATH`` is read from this module's globals on every call, the same
+    way ``AUDIT_PATH`` is, so a test or a deployment can repoint the store.
+    """
+    from modules.flexible_plans import get_plan_by_token
+
+    plan = get_plan_by_token(str(token or ""), path=PLAN_DB_PATH)
+    if plan is None:
+        return None, (jsonify({"error": "This payment plan link is not valid. Please contact us for a fresh one."}), 404)
+    return plan, None
+
+
+def _plan_snapshot(plan: dict[str, Any]) -> dict[str, Any]:
+    """The customer's own view of their plan. No case internals, no operator data."""
+    from modules.flexible_plans import display_status, is_expired
+    from modules.plan_chat import build_context, opening_message, policy_sentence
+
+    context = build_context(plan)
+    first_unpaid = next((row for row in plan["installments"] if row["status"] != "paid"), None)
+    return {
+        "customer_name": context["customer_name"],
+        "original_amount": context["original_amount"],
+        "currency": context["currency"],
+        "amount_paid": plan["amount_paid"],
+        "amount_remaining": plan["amount_remaining"],
+        "status": plan["status"],
+        "status_label": display_status(plan),
+        "expired": is_expired(plan),
+        "voice_hint": context["voice_hint"],
+        "plan_summary": plan["plan_summary"],
+        "installments": plan["installments"],
+        "policy": policy_sentence(context),
+        "opening_message": opening_message(plan),
+        "pay_url": str((first_unpaid or {}).get("link_url") or ""),
+        "confirmed": plan["status"] in {"confirmed", "link_sent", "active", "completed"},
+    }
+
+
+@app.get("/recover/flexible-plan/<token>")
+def flexible_plan_page(token: str):
+    """Serve the customer's chatbot page.
+
+    Bypasses ``_serve_client_console`` on purpose: this page belongs to a
+    customer, not an operator, so gating it behind the dashboard login would
+    make the emailed link unopenable. The token is validated by the API calls
+    the page then makes, not here, so an invalid token still renders a page that
+    can say so.
+    """
+    return _serve_bundle()
+
+
+@app.get("/api/flexible-plan/<token>")
+def flexible_plan_context_api(token: str):
+    """Open the conversation: the plan as its own customer may see it."""
+    plan, error = _plan_for_token(token)
+    if error is not None:
+        return error
+    return jsonify(_plan_snapshot(plan))
+
+
+@app.post("/api/flexible-plan/<token>/chat")
+def flexible_plan_chat_api(token: str):
+    """One negotiation turn. Decides nothing on its own authority."""
+    from modules.flexible_plans import mark_negotiating
+    from modules.plan_chat import negotiate
+
+    plan, error = _plan_for_token(token)
+    if error is not None:
+        return error
+    payload = request.get_json(silent=True) or {}
+    message = str(payload.get("message") or "").strip()
+    if not message:
+        return jsonify({"error": "Tell me what payment plan works for you."}), 400
+    if plan["status"] in {"active", "completed"}:
+        return jsonify({"error": "This payment plan is already running. Please use the payment link we emailed you."}), 409
+
+    try:
+        turn = negotiate(plan, message, history=list(payload.get("history") or []))
+    except Exception as exc:  # noqa: BLE001 - a negotiation must never 500 at a customer
+        return jsonify({"error": f"That could not be read as a payment plan: {exc}"}), 400
+
+    if plan["status"] == "invited":
+        try:
+            mark_negotiating(plan["id"], path=PLAN_DB_PATH)
+        except Exception:  # noqa: BLE001 - a status nudge is not worth failing the reply
+            pass
+    # The full context carries merchant policy internals the assistant needed;
+    # the customer only needs the sentence.
+    turn.pop("context", None)
+    turn.pop("checks", None)
+    return jsonify(turn)
+
+
+@app.post("/api/flexible-plan/<token>/confirm")
+def flexible_plan_confirm_api(token: str):
+    """Confirm the schedule the customer chose, then bill its first installment.
+
+    The posted schedule is re-priced and re-gated here before anything is
+    frozen: a client could post any figures, so the browser's copy of an
+    approved plan is treated as a request, never as the decision.
+    """
+    from modules.plan_chat import build_context, price_rows
+    from modules.plan_outreach import confirm_and_bill
+    from modules.policy_engine import evaluate_plan_schedule
+
+    plan, error = _plan_for_token(token)
+    if error is not None:
+        return error
+    payload = request.get_json(silent=True) or {}
+    proposed = payload.get("installments")
+    if not isinstance(proposed, list) or not proposed:
+        return jsonify({"error": "Choose a payment plan before confirming."}), 400
+
+    context = build_context(plan)
+    rows = price_rows([dict(row) for row in proposed if isinstance(row, dict)], context)
+    verdict = evaluate_plan_schedule(context["original_amount"], rows)
+    if not verdict.approved:
+        return jsonify({"error": verdict.reason, "reason_code": verdict.reason_code, "approved": False}), 422
+
+    result = confirm_and_bill(
+        plan["id"],
+        verdict.installments,
+        audit_path=AUDIT_PATH,
+        plan_path=PLAN_DB_PATH,
+        attempts_path=ATTEMPTS_DB_PATH,
+    )
+    if not result["confirmed"]:
+        return jsonify({"error": result["reason"], "approved": False}), 422
+    fresh, _ = _plan_for_token(token)
+    return jsonify({
+        "confirmed": True,
+        "sent": result["sent"],
+        "reason": result["reason"],
+        "pay_url": result.get("link_url", ""),
+        "amount_due_now": result.get("amount"),
+        "plan": _plan_snapshot(fresh) if fresh else {},
+    })
 
 
 @app.post("/webhooks/vapi")

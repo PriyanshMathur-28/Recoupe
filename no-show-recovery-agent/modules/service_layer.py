@@ -9,6 +9,7 @@ from typing import Any
 
 from .audit_log import AUDIT_PATH, log_event
 from .attempt_tracker import DB_PATH as ATTEMPTS_DB_PATH, check_cooldown, get_next_retry_at, list_client_email_statuses, list_owner_flags, record_client_email_sent, resolve_owner_flag
+from .flexible_plans import PLAN_DB_PATH, list_plans as list_payment_plans
 from .razorpay_webhooks import RECOVERY_DB_PATH, list_recovery_records
 from .waitlist import DB_PATH as WAITLIST_DB_PATH, add_to_waitlist, get_next_in_line, list_waitlist, mark_slot, update_waitlist_entry
 
@@ -42,11 +43,12 @@ def draft_invoice_number(key: str, timestamp: str) -> str:
 class RecoveryService:
     """Coordinate operational state without coupling callers to storage details."""
 
-    def __init__(self, audit_path: Path = AUDIT_PATH, attempts_path: Path = ATTEMPTS_DB_PATH, waitlist_path: Path = WAITLIST_DB_PATH, recovery_path: Path = RECOVERY_DB_PATH):
+    def __init__(self, audit_path: Path = AUDIT_PATH, attempts_path: Path = ATTEMPTS_DB_PATH, waitlist_path: Path = WAITLIST_DB_PATH, recovery_path: Path = RECOVERY_DB_PATH, plan_path: Path = PLAN_DB_PATH):
         self.audit_path = audit_path
         self.attempts_path = attempts_path
         self.waitlist_path = waitlist_path
         self.recovery_path = recovery_path
+        self.plan_path = plan_path
 
     def review_flags(self) -> list[dict[str, Any]]:
         return list_owner_flags(self.attempts_path)
@@ -96,6 +98,10 @@ class RecoveryService:
         statuses = list_client_email_statuses(self.attempts_path)
         # Webhook-confirmed recoveries — the source of truth for ₹ recovered.
         recovery_records = list_recovery_records(self.recovery_path)
+        # Flexible payment plans, keyed by the SAME case id the audit rows group
+        # by. A plan is extra facts about an existing case, never a case of its
+        # own, so a case with no plan is untouched by everything below.
+        plans = list_payment_plans(self.plan_path)
         clients = []
         for client_id, entries in grouped.items():
             entries.sort(key=lambda item: (str(item[1].get("timestamp") or ""), item[0]))
@@ -148,6 +154,23 @@ class RecoveryService:
                 confirmed_payment_status = "recovered"
                 amount_recovered = float(recovery.get("amount_recovered") or 0)
                 recovered_at = recovery.get("recovered_at")
+            # A confirmed plan re-labels the case and takes over its money. The
+            # plan's own installment rows are cumulative, while a recovery record
+            # is the LATEST confirmed payment only, so an active plan is the more
+            # accurate source for "recovered so far" once anything has been paid.
+            plan = plans.get(client_id)
+            plan_status = ""
+            plan_summary = ""
+            plan_outcome = ""
+            amount_remaining: float | None = None
+            if plan:
+                plan_status = str(plan.get("status") or "")
+                plan_summary = str(plan.get("plan_summary") or "")
+                plan_outcome = str(plan.get("display_status") or "")
+                if plan.get("installments_paid"):
+                    amount_recovered = float(plan.get("amount_paid") or 0)
+                    confirmed_payment_status = "recovered" if plan_status == "completed" else "partially_paid"
+                amount_remaining = float(plan.get("amount_remaining") or 0)
             # Cooldown and next-retry window for the UI stopping-rule card.
             cooldown_active = check_cooldown(client_id, self.attempts_path, action_scope="payment")
             next_retry_at = get_next_retry_at(client_id, self.attempts_path, action_scope="payment") if cooldown_active else None
@@ -174,6 +197,17 @@ class RecoveryService:
                 # Webhook-confirmed recovery fields.
                 "amount_recovered": amount_recovered,
                 "recovered_at": recovered_at,
+                # Flexible payment plan fields. Empty strings and None for a case
+                # without a plan, so every existing consumer reads them as absent.
+                "plan_status": plan_status,
+                "plan_outcome": plan_outcome,
+                "plan_summary": plan_summary,
+                "plan_installments": plan.get("installments") if plan else [],
+                "plan_installments_paid": plan.get("installments_paid") if plan else 0,
+                "plan_installment_count": plan.get("installment_count") if plan else 0,
+                "plan_next_due_date": (plan.get("next_installment") or {}).get("due_date") if plan else "",
+                "plan_next_amount": (plan.get("next_installment") or {}).get("amount") if plan else None,
+                "amount_remaining": amount_remaining,
                 # Stopping-rule fields for the UI drawer.
                 "cooldown_active": cooldown_active,
                 "next_retry_at": decision_row.get("next_attempt_at") or next_retry_at,

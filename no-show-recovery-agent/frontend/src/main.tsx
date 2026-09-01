@@ -10,6 +10,7 @@ import { ConfirmDialog } from "./components/ConfirmDialog";
 import type { ConfirmRequest } from "./components/ConfirmDialog";
 import { Toasts } from "./components/Toasts";
 import { LandingPage } from "./components/LandingPage";
+import { FlexiblePlanChat } from "./components/FlexiblePlanChat";
 import { VoiceCallingPanel } from "./components/VoiceCallingPanel";
 import { CallHistoryList } from "./components/CallHistoryList";
 import { CONDITIONS, conditionLabel } from "./types";
@@ -24,15 +25,24 @@ import "./styles/tailwind.css";
 // tailwind.css is imported, because its @tailwind directives must be compiled.
 
 /**
- * The compiled bundle is served by Flask at three URLs (/, /dashboard,
- * /clients). The marketing landing page owns the site root, while the recovery
- * console lives at /dashboard and its /clients alias. A single bundle switching
- * on pathname keeps the existing single-build deployment intact.
+ * The compiled bundle is served by Flask at four URLs (/, /dashboard,
+ * /clients, /recover/flexible-plan/<token>). The marketing landing page owns
+ * the site root, the recovery console lives at /dashboard and its /clients
+ * alias, and the customer's own payment-plan chatbot lives under
+ * /recover/flexible-plan/. A single bundle switching on pathname keeps the
+ * existing single-build deployment intact.
  */
 const isDashboardPath = () => {
     const path = window.location.pathname.replace(/\/+$/, "") || "/";
     return path === "/dashboard" || path === "/clients";
 };
+
+/**
+ * The customer chatbot page. Checked before the dashboard because it is the one
+ * route whose visitor has no operator session: it must never render the console
+ * shell, which would immediately fetch operator-only APIs and fail.
+ */
+const isFlexiblePlanPath = () => window.location.pathname.startsWith("/recover/flexible-plan/");
 
 const Icon = ({ children, className = "" }: { children: string; className?: string }) => <span className={`material-symbols-outlined ${className}`} aria-hidden="true">{children}</span>;
 const errorMessage = (error: unknown): string => error instanceof ApiError || error instanceof Error ? error.message : "An unexpected error occurred.";
@@ -466,4 +476,6 @@ function HistoryTable({ rows, onOpen, clearFilters }: { rows: HistoryRow[]; onOp
 
 const root = document.getElementById("root");
 if (!root) throw new Error("Missing #root application mount point");
-createRoot(root).render(<StrictMode>{isDashboardPath() ? <App /> : <LandingPage />}</StrictMode>);
+createRoot(root).render(
+    <StrictMode>{isFlexiblePlanPath() ? <FlexiblePlanChat /> : isDashboardPath() ? <App /> : <LandingPage />}</StrictMode>,
+);

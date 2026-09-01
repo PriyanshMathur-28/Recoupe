@@ -178,9 +178,13 @@ def normalize_installments(installments: Any) -> list[dict[str, Any]]:
     Returns rows shaped ``{"index", "amount", "due_date", "status", "paid_at",
     "payment_id", "link_id", "link_url"}``. Ordering is by index so "the next
     installment" is always well defined.
+
+    Tuples are accepted as well as lists, because the approved schedule arrives
+    as :attr:`modules.policy_engine.PlanVerdict.installments`, which is a frozen
+    tuple. Rejecting it here would have silently emptied a confirmed plan.
     """
     rows: list[dict[str, Any]] = []
-    for position, raw in enumerate(installments if isinstance(installments, list) else [], start=1):
+    for position, raw in enumerate(installments if isinstance(installments, (list, tuple)) else [], start=1):
         if not isinstance(raw, dict):
             continue
         amount = _money(raw.get("amount"))

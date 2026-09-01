@@ -224,6 +224,16 @@ export function CasesTable({
                                                 </div>
                                             )}
                                             <ConditionBadge condition={client.condition} />
+                                            {/* A confirmed flexible plan re-labels the case without
+                                                replacing its action badge. */}
+                                            {client.plan_status && (
+                                                <span
+                                                    className="text-xs font-medium text-action-indigo"
+                                                    title={client.plan_summary || undefined}
+                                                >
+                                                    {client.plan_outcome || "Flexible payment plan"}
+                                                </span>
+                                            )}
                                         </div>
                                     </td>
 

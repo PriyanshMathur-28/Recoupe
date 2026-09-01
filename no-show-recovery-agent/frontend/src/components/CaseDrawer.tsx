@@ -178,6 +178,20 @@ export function CaseDrawer({ client, sending, simulating = false, onClose, onSen
                                                 {client.recovered_at && ` on ${new Date(client.recovered_at).toLocaleDateString(undefined, { dateStyle: "medium" })}`}
                                             </p>
                                         )}
+                                        {/* The customer negotiated their own schedule in the flexible-plan
+                                            chatbot; the money still belongs to THIS case. */}
+                                        {client.plan_status && (
+                                            <p className={styles.stopRule} style={{ background: "var(--secondary-fixed, #e8f0fe)" }}>
+                                                📅 {client.plan_outcome || "Flexible payment plan"}
+                                                {client.plan_summary && ` — ${client.plan_summary}`}
+                                                {typeof client.amount_remaining === "number" && client.amount_remaining > 0
+                                                    ? ` · ₹${client.amount_remaining.toLocaleString("en-IN")} remaining`
+                                                    : ""}
+                                                {client.plan_installment_count
+                                                    ? ` · installment ${client.plan_installments_paid ?? 0}/${client.plan_installment_count}`
+                                                    : ""}
+                                            </p>
+                                        )}
                                     </div>
                                     {/* Product controls; legal requirements require independent verification. */}
                                     <div className={styles.decisionCard} style={{ marginTop: "0.75rem", fontSize: "0.78rem", color: "var(--text-muted)" }}>

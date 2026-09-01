@@ -31,11 +31,17 @@ from typing import Any
 
 from .audit_log import AUDIT_PATH, log_event
 from .flexible_plans import (
+    PLAN_CONFIRMED_ACTION,
     PLAN_INVITED_ACTION,
+    PLAN_LINK_ACTION,
     PLAN_REQUESTED_ACTION,
     PLAN_DB_PATH,
     PlanError,
+    attach_installment_link,
+    confirm_plan,
     create_or_refresh_plan,
+    get_plan,
+    link_notes,
     plan_summary_line,
 )
 
@@ -131,7 +137,7 @@ def confirmed_email(plan: dict[str, Any], installment: dict[str, Any], short_url
         "",
         "We will email the next link when it is due.",
     ]
-    return {"subject": f"Flexible payment plan confirmed - pay {due_now}", "body": "\n".join(lines)}
+    return {"subject": f"Flexible Payment Plan Confirmed - pay {due_now}", "body": "\n".join(lines)}
 
 
 def _plan_audit_event(plan: dict[str, Any], case: dict[str, Any], event_type: str, **extra: Any) -> dict[str, Any]:
@@ -310,8 +316,264 @@ def plan_invite_for_call(
     return result
 
 
+def _case_for_plan(
+    plan: dict[str, Any],
+    audit_path: Path = AUDIT_PATH,
+    attempts_path: Path | None = None,
+) -> dict[str, Any]:
+    """The recovery case a plan settles, in the shape :func:`_plan_audit_event` reads.
+
+    The live case is preferred so the audit row carries exactly the identity the
+    dashboard groups by. When it cannot be found — the CSV was replaced, say —
+    the plan's own copy of those facts stands in, because a payment that has
+    already happened must still be recorded against its client.
+    """
+    from .voice_calls import _case_for_send
+
+    try:
+        case = _case_for_send(str(plan.get("case_id") or ""), audit_path, attempts_path)
+    except Exception:  # noqa: BLE001 - a missing case must not stop an audit row
+        case = None
+    if case is not None:
+        return case
+    return {
+        "case": {
+            "client_id": str(plan.get("case_id") or ""),
+            "client_name": str(plan.get("client_name") or ""),
+            "client_email": str(plan.get("client_email") or ""),
+            "event_type": str(plan.get("event_type") or ""),
+            "amount": plan.get("original_amount"),
+            "source": str(plan.get("origin") or "voice_recovery"),
+        }
+    }
+
+
+def next_unpaid_installment(plan: dict[str, Any], index: Any = None) -> dict[str, Any] | None:
+    """The installment a link should be minted for.
+
+    Either the one explicitly asked for, or the earliest that is not yet paid.
+    Only ever one: billing the whole schedule at once would be the full amount
+    again, which is the thing the customer said they could not pay.
+    """
+    rows = list(plan.get("installments") or [])
+    if index is not None:
+        try:
+            wanted = int(index)
+        except (TypeError, ValueError):
+            return None
+        return next((row for row in rows if int(row.get("index") or 0) == wanted), None)
+    return next((row for row in rows if str(row.get("status") or "") != "paid"), None)
+
+
+def send_installment_link(
+    plan: dict[str, Any],
+    *,
+    case: dict[str, Any] | None = None,
+    index: Any = None,
+    audit_path: Path = AUDIT_PATH,
+    plan_path: Path = PLAN_DB_PATH,
+    attempts_path: Path | None = None,
+    message_service: Any = None,
+    payment_client: Any = None,
+    actor: str = "flexible_plan_chatbot",
+) -> dict[str, Any]:
+    """Bill ONE installment of a confirmed plan: new link, email, audit row.
+
+    A brand-new Razorpay link is minted through the existing
+    :func:`modules.payments.create_payment_link` — the link that already failed
+    is never reused, and no second Razorpay client is introduced. Its ``notes``
+    come from :func:`modules.flexible_plans.link_notes`, which is what lets the
+    existing webhook credit the payment back to the ORIGINAL recovery case.
+
+    A link the installment already holds is emailed again rather than replaced,
+    so a customer who reloads the page or a retried request cannot leave two
+    live links for the same money.
+
+    Never raises. A confirmed plan is a recorded commitment, and a provider
+    outage or a bounced email must not undo it, so the failure is audited and
+    returned the way :func:`send_plan_invite` returns its own.
+    """
+    result: dict[str, Any] = {"sent": False, "link_created": False, "reason": ""}
+    installment = next_unpaid_installment(plan, index)
+    if installment is None:
+        result["blocked_by"] = "nothing_to_bill"
+        result["reason"] = "This plan has no unpaid installment to bill."
+        return result
+
+    if case is None:
+        case = _case_for_plan(plan, audit_path, attempts_path)
+    number = int(installment.get("index") or 1)
+    total = len(plan.get("installments") or [])
+    result["installment"] = number
+    result["amount"] = installment.get("amount")
+
+    link_id = str(installment.get("link_id") or "")
+    short_url = str(installment.get("link_url") or "")
+    if not (link_id and short_url):
+        from .payments import create_payment_link
+
+        reference = str(plan.get("case_key") or plan.get("case_id") or "").strip()
+        description = f"Payment plan {number} of {total}" + (f" - {reference}" if reference else "")
+        try:
+            response = create_payment_link(
+                installment.get("amount"),
+                str(plan.get("client_name") or "Customer"),
+                description,
+                str(plan.get("client_email") or ""),
+                client=payment_client,
+                notes=link_notes(plan, installment),
+            )
+            link_id, short_url = str(response["id"]), str(response["short_url"])
+        except Exception as exc:  # noqa: BLE001 - a provider outage is a recorded fact
+            result["error"] = str(exc)
+            result["reason"] = f"The installment payment link could not be created: {exc}"
+            log_event(
+                _plan_audit_event(plan, case, "flexible_plan_link", installment_index=number),
+                PLAN_LINK_ACTION,
+                result["reason"],
+                "not_applicable",
+                audit_path,
+                errors=[str(exc)],
+                outcome="technical_error",
+                actor=actor,
+            )
+            return result
+
+        try:
+            plan = attach_installment_link(plan["id"], number, link_id, short_url, path=plan_path)
+        except (PlanError, LookupError) as exc:
+            result["error"] = str(exc)
+            result["reason"] = f"The installment link was created but could not be attached: {exc}"
+            log_event(
+                _plan_audit_event(plan, case, "flexible_plan_link", installment_index=number),
+                PLAN_LINK_ACTION,
+                result["reason"],
+                "link_created",
+                audit_path,
+                errors=[str(exc)],
+                outcome="technical_error",
+                actor=actor,
+            )
+            return result
+        installment = next_unpaid_installment(plan, number) or installment
+
+    result["link_created"] = True
+    result["link_id"] = link_id
+    result["link_url"] = short_url
+    result["plan_status"] = plan.get("status") or ""
+
+    letter = confirmed_email(plan, installment, short_url)
+    try:
+        from .messenger import send_email
+
+        send_email(plan["client_email"], letter["subject"], letter["body"], service=message_service)
+    except Exception as exc:  # noqa: BLE001 - a failed send is a recorded fact, not a crash
+        result["error"] = str(exc)
+        result["reason"] = f"The payment link was created but could not be emailed: {exc}"
+        log_event(
+            _plan_audit_event(plan, case, "flexible_plan_link", installment_index=number, link_url=short_url),
+            PLAN_LINK_ACTION,
+            letter["subject"],
+            "link_created",
+            audit_path,
+            errors=[str(exc)],
+            outcome="technical_error",
+            actor=actor,
+        )
+        return result
+
+    result["sent"] = True
+    result["reason"] = f"{_rupees(installment.get('amount'))} payment link emailed to the customer."
+    log_event(
+        _plan_audit_event(
+            plan,
+            case,
+            "flexible_plan_link",
+            installment_index=number,
+            installment_amount=installment.get("amount"),
+            link_id=link_id,
+            link_url=short_url,
+            plan_summary=plan.get("plan_summary") or "",
+        ),
+        PLAN_LINK_ACTION,
+        letter["body"],
+        "link_created",
+        audit_path,
+        outcome="plan_link_sent",
+        actor=actor,
+    )
+    return result
+
+
+def confirm_and_bill(
+    plan_id: Any,
+    installments: list[dict[str, Any]],
+    *,
+    case: dict[str, Any] | None = None,
+    audit_path: Path = AUDIT_PATH,
+    plan_path: Path = PLAN_DB_PATH,
+    attempts_path: Path | None = None,
+    message_service: Any = None,
+    payment_client: Any = None,
+    actor: str = "flexible_plan_chatbot",
+) -> dict[str, Any]:
+    """Freeze the customer's confirmed schedule, then bill its first installment.
+
+    The one entry point the chatbot calls when the customer presses Confirm
+    Plan. The schedule must already have been approved by
+    :func:`modules.policy_engine.evaluate_plan_schedule`;
+    :func:`modules.flexible_plans.confirm_plan` independently refuses anything
+    that does not settle the whole debt, so a caller that skipped the gate still
+    cannot grant a discount here.
+    """
+    result: dict[str, Any] = {"confirmed": False, "sent": False, "reason": ""}
+    try:
+        plan = confirm_plan(int(plan_id), installments, path=plan_path)
+    except (PlanError, LookupError, TypeError, ValueError) as exc:
+        result["blocked_by"] = "plan_refused"
+        result["reason"] = str(exc)
+        return result
+
+    if case is None:
+        case = _case_for_plan(plan, audit_path, attempts_path)
+    log_event(
+        _plan_audit_event(
+            plan,
+            case,
+            "flexible_plan_confirmed",
+            plan_summary=plan["plan_summary"],
+            installments=plan["installments"],
+        ),
+        PLAN_CONFIRMED_ACTION,
+        f"The customer confirmed a payment plan: {plan['plan_summary']}.",
+        "not_applicable",
+        audit_path,
+        outcome="plan_confirmed",
+        actor=actor,
+    )
+
+    billed = send_installment_link(
+        plan,
+        case=case,
+        audit_path=audit_path,
+        plan_path=plan_path,
+        attempts_path=attempts_path,
+        message_service=message_service,
+        payment_client=payment_client,
+        actor=actor,
+    )
+    result.update(billed)
+    result["confirmed"] = True
+    result["plan_id"] = plan["id"]
+    result["plan_summary"] = plan["plan_summary"]
+    result["installments"] = plan["installments"]
+    return result
+
+
 if __name__ == "__main__":  # pragma: no cover - module self-test
     import tempfile
+
+    from .audit_log import read_events
 
     with tempfile.TemporaryDirectory(ignore_cleanup_errors=True) as tmp:
         failures: list[str] = []
@@ -376,6 +638,115 @@ if __name__ == "__main__":  # pragma: no cover - module self-test
             plan_path=Path(tmp) / "plans.sqlite3",
         )
         check("the kill switch records the request without emailing", off["requested"] and not off["invited"] and off["blocked_by"] == "auto_email_disabled")
+
+        # --- confirmation, link and email, against fakes for both providers ---
+        class _Gmail:
+            """The narrow slice of the Gmail client messenger.send_email touches."""
+
+            def __init__(self) -> None:
+                self.sent: list[dict[str, Any]] = []
+
+            def users(self):
+                return self
+
+            def messages(self):
+                return self
+
+            def send(self, userId: str, body: dict[str, Any]):  # noqa: N803 - the API's own name
+                self._body = body
+                return self
+
+            def execute(self):
+                self.sent.append(self._body)
+                return {"id": f"msg-{len(self.sent)}"}
+
+        class _Links:
+            def __init__(self) -> None:
+                self.requests: list[dict[str, Any]] = []
+
+            def create(self, request: dict[str, Any]) -> dict[str, Any]:
+                self.requests.append(request)
+                return {"id": f"plink_{len(self.requests)}", "short_url": f"https://rzp.io/i/plan{len(self.requests)}"}
+
+        class _Razorpay:
+            def __init__(self) -> None:
+                self.payment_link = _Links()
+
+        class _BrokenRazorpay:
+            class payment_link:  # noqa: N801 - mirrors the SDK's attribute name
+                @staticmethod
+                def create(request: dict[str, Any]) -> dict[str, Any]:
+                    raise RuntimeError("razorpay is unreachable")
+
+        audit = Path(tmp) / "audit.csv"
+        plans = Path(tmp) / "plans.sqlite3"
+        live_case = {
+            "client_id": "C-9",
+            "client_name": "Aditya Sharma",
+            "client_email": "aditya@example.com",
+            "amount": 10000.0,
+            "case_key": "C-9|resend_payment_link",
+            "case": {
+                "client_id": "C-9",
+                "client_name": "Aditya Sharma",
+                "client_email": "aditya@example.com",
+                "event_type": "payment_failed",
+                "amount": 10000.0,
+                "source": "voice_recovery",
+            },
+        }
+        opened, _token = create_or_refresh_plan(live_case, path=plans)
+        gmail, rzp = _Gmail(), _Razorpay()
+        billed = confirm_and_bill(
+            opened["id"],
+            [{"amount": 3000.0, "due_date": "2026-09-01"}, {"amount": 7000.0, "due_date": "2026-09-04"}],
+            case=live_case,
+            audit_path=audit,
+            plan_path=plans,
+            message_service=gmail,
+            payment_client=rzp,
+        )
+        check("confirming freezes the schedule", billed["confirmed"] and billed["plan_summary"].startswith("Rs 3,000"))
+        check("exactly one link is minted", len(rzp.payment_link.requests) == 1)
+        check("only the first installment is charged", rzp.payment_link.requests[0]["amount"] == 300000)
+        check("the link carries the plan id in its notes", rzp.payment_link.requests[0]["notes"]["flexible_plan_id"] == str(opened["id"]))
+        check("the notes keep an existing recovery action", rzp.payment_link.requests[0]["notes"]["recovery_action"] == "resend_payment_link")
+        check("the confirmation email was delivered", billed["sent"] and len(gmail.sent) == 1)
+        check("the plan is marked link_sent", billed["plan_status"] == "link_sent")
+
+        actions = [row["action"] for row in read_events(audit)]
+        check("the confirmation is audited", PLAN_CONFIRMED_ACTION in actions)
+        check("the link send is audited", PLAN_LINK_ACTION in actions)
+
+        stored = get_plan(opened["id"], path=plans)
+        check("the link is bound to installment 1", stored["installments"][0]["link_url"] == "https://rzp.io/i/plan1")
+        check("installment 2 is still pending", stored["installments"][1]["status"] == "pending")
+
+        resent = send_installment_link(stored, case=live_case, audit_path=audit, plan_path=plans, message_service=gmail, payment_client=rzp)
+        check("a repeat send reuses the same link", len(rzp.payment_link.requests) == 1 and resent["link_url"] == "https://rzp.io/i/plan1")
+
+        broke = send_installment_link(
+            stored,
+            case=live_case,
+            index=2,
+            audit_path=audit,
+            plan_path=plans,
+            message_service=gmail,
+            payment_client=_BrokenRazorpay(),
+        )
+        check("a provider failure is reported, not raised", broke["sent"] is False and "error" in broke)
+        check("a failed mint sends no email", len(gmail.sent) == 2)
+
+        refused = confirm_and_bill(
+            opened["id"],
+            [{"amount": 3000.0, "due_date": "2026-09-01"}],
+            case=live_case,
+            audit_path=audit,
+            plan_path=plans,
+            message_service=gmail,
+            payment_client=rzp,
+        )
+        check("a plan that does not settle the debt is refused", refused["confirmed"] is False and refused["blocked_by"] == "plan_refused")
 
         print("\n" + ("ALL CHECKS PASSED" if not failures else f"{len(failures)} CHECK(S) FAILED"))
         if failures:
