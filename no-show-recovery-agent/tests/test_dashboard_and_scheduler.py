@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import csv
+import re
 import threading
 from pathlib import Path
 
@@ -174,3 +175,86 @@ def test_dashboard_and_clients_use_same_frontend(monkeypatch):
 def test_dashboard_template_exists():
     assert Path("templates/dashboard.html").exists()
     assert "Case outcomes" in Path("templates/dashboard.html").read_text(encoding="utf-8")
+
+
+CSRF_META = re.compile(r'<meta name="csrf-token" content="([^"]+)">')
+
+
+def _signed_in_console(monkeypatch):
+    """A test client holding an authenticated operator session."""
+    monkeypatch.setattr("dashboard.DASHBOARD_PASSWORD", "secret")
+    monkeypatch.setattr("dashboard.DASHBOARD_USER", "owner")
+    client = app.test_client()
+    with client.session_transaction() as browser_session:
+        browser_session["dashboard_user"] = "owner"
+    return client
+
+
+def test_console_document_carries_the_token_its_own_client_sends(monkeypatch):
+    """The served console must contain the meta tag frontend/src/api.ts reads.
+
+    api.ts sends ``X-CSRF-Token`` from ``meta[name="csrf-token"]`` on every
+    non-GET request. The compiled bundle cannot contain a per-session token, so
+    Flask has to splice it in at serve time. When it did not, the console sent an
+    empty header and every mutation came back 403 "Invalid CSRF token" — what a
+    signed-in operator hit on the business-document step of the upload gate.
+    """
+    client = _signed_in_console(monkeypatch)
+    match = CSRF_META.search(client.get("/dashboard").get_data(as_text=True))
+    assert match is not None, "the served console carries no csrf-token meta tag"
+    with client.session_transaction() as browser_session:
+        assert browser_session["csrf_token"] == match.group(1)
+
+
+def test_console_mutation_is_accepted_with_the_injected_token(monkeypatch):
+    saved = {}
+
+    def fake_save_profile(text, source_name=""):
+        saved["text"] = text
+        return {"source_name": source_name, "saved_at": "2026-09-02T00:00:00+00:00", "characters": len(text)}
+
+    client = _signed_in_console(monkeypatch)
+    monkeypatch.setattr("dashboard.save_profile", fake_save_profile)
+    token = CSRF_META.search(client.get("/dashboard").get_data(as_text=True)).group(1)
+
+    response = client.post(
+        "/api/merchant-profile",
+        json={"text": "Peak Fitness is a strength-training studio in Pune."},
+        headers={"X-CSRF-Token": token},
+    )
+
+    assert response.status_code == 200
+    assert response.get_json()["saved"] is True
+    assert saved["text"].startswith("Peak Fitness")
+
+
+def test_console_mutation_without_the_token_is_still_rejected(monkeypatch):
+    client = _signed_in_console(monkeypatch)
+    client.get("/dashboard")
+    response = client.post("/api/merchant-profile", json={"text": "Peak Fitness is a studio in Pune."})
+    assert response.status_code == 403
+    assert response.get_json() == {"error": "Invalid CSRF token"}
+
+
+def test_expired_console_session_is_told_so_in_json(monkeypatch):
+    """fetch() follows a 302 silently, so a JSON caller must get a status."""
+    monkeypatch.setattr("dashboard.DASHBOARD_PASSWORD", "secret")
+    monkeypatch.setattr("dashboard.DASHBOARD_USER", "owner")
+    response = app.test_client().post("/api/merchant-profile", json={"text": "Peak Fitness is a studio."})
+    assert response.status_code == 401
+    assert "sign in" in response.get_json()["error"].lower()
+
+
+def test_customer_plan_page_is_never_handed_an_operator_token(monkeypatch):
+    """The plan page shares the bundle but authenticates by URL bearer token."""
+    monkeypatch.setattr("dashboard.DASHBOARD_PASSWORD", "secret")
+    monkeypatch.setattr("dashboard.DASHBOARD_USER", "owner")
+    client = app.test_client()
+    with client.session_transaction() as browser_session:
+        browser_session["dashboard_user"] = "owner"
+        browser_session["csrf_token"] = "operator-only-token"
+
+    body = client.get("/recover/flexible-plan/some-token").get_data(as_text=True)
+
+    assert "csrf-token" not in body
+    assert "operator-only-token" not in body

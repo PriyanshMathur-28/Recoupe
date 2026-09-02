@@ -46,6 +46,26 @@ def _validate_live_configuration(include_calendar: bool) -> None:
         raise SystemExit("Missing live configuration: " + ", ".join(missing) + ". See .env.example.")
 
 
+def _clear_persistent_state() -> None:
+    """Clear uploaded data and logs so each run starts with a clean slate."""
+    data_dir = ROOT / "data"
+    if data_dir.exists():
+        for item in data_dir.iterdir():
+            if item.is_file():
+                try:
+                    item.unlink()
+                except OSError:
+                    pass
+    logs_dir = ROOT / "logs"
+    if logs_dir.exists():
+        for item in logs_dir.iterdir():
+            if item.is_file():
+                try:
+                    item.unlink()
+                except OSError:
+                    pass
+
+
 def _start_dashboard(host: str, port: int) -> None:
     from dashboard import app, ensure_port_available
 
@@ -57,6 +77,9 @@ def run(include_calendar: bool, dashboard: bool, host: str, port: int) -> None:
     load_dotenv(ROOT / ".env")
     _configure_logging()
     _validate_live_configuration(include_calendar)
+
+    logging.getLogger(__name__).info("Clearing previous run state for a clean slate...")
+    _clear_persistent_state()
 
     from main import create_scheduler, process_pending_events
 

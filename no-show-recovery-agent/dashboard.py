@@ -2,14 +2,16 @@
 from __future__ import annotations
 
 import csv
+import html
 import io
 import json
 import math
+import secrets
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
-from flask import Flask, jsonify, redirect, render_template, render_template_string, request, send_file, session, url_for
+from flask import Flask, jsonify, make_response, redirect, render_template, render_template_string, request, send_file, session, url_for
 
 from batch_runner import run_batch
 from modules.audit_log import AUDIT_PATH
@@ -378,7 +380,9 @@ def login_submit():
         # the inline error via the ?login=failed flag.
         return redirect(url_for("home", login="failed")), 401
     session["dashboard_user"] = DASHBOARD_USER
-    session["csrf_token"] = __import__("secrets").token_urlsafe(32)
+    # A fresh token per sign-in, so a token observed before authentication can
+    # never be replayed against the new session.
+    session["csrf_token"] = secrets.token_urlsafe(32)
     return redirect(url_for("dashboard"))
 
 
@@ -388,13 +392,37 @@ def logout():
     return redirect(url_for("home"))
 
 
+def _ensure_csrf_token() -> str:
+    """Return this session's CSRF token, minting one when the session has none.
+
+    Minted on demand as well as at sign-in so a session that predates the token
+    (or one carried over a restart) repairs itself on the next console load,
+    instead of having every mutation rejected as an invalid token forever.
+    """
+    token = str(session.get("csrf_token") or "")
+    if not token:
+        token = secrets.token_urlsafe(32)
+        session["csrf_token"] = token
+    return token
+
+
+def _expects_json() -> bool:
+    """True when the caller is the console's fetch client, not an HTML form."""
+    return request.path.startswith("/api/") or request.accept_mimetypes.best == "application/json"
+
+
 def _require_mutation_access():
     """Require configured owner credentials and a session-bound CSRF token."""
     if not DASHBOARD_PASSWORD:
         return jsonify({"error": "Dashboard mutations are disabled until DASHBOARD_PASSWORD is configured"}), 503
     if session.get("dashboard_user") != DASHBOARD_USER:
+        # fetch() follows a 302 transparently and would read the landing page's
+        # HTML as a successful response body, so a JSON caller is told plainly.
+        if _expects_json():
+            return jsonify({"error": "Your session has expired. Sign in again, then retry."}), 401
         return redirect(url_for("home"))
-    if not session.get("csrf_token") or request.form.get("csrf_token") != session.get("csrf_token"):
+    provided_token = request.headers.get("X-CSRF-Token") or request.form.get("csrf_token")
+    if not session.get("csrf_token") or provided_token != session.get("csrf_token"):
         return jsonify({"error": "Invalid CSRF token"}), 403
     return None
 
@@ -564,6 +592,9 @@ def data_status_api():
     part of ``ready``: the dashboard opens on the case data alone, because the
     document only changes how the plan chatbot talks, never what it decides.
     """
+    if not RECOVERY_CASES_PATH.exists() and "data_uploaded_at" in session:
+        session.pop("data_uploaded_at", None)
+
     uploaded_at = session.get("data_uploaded_at")
     return jsonify({
         "ready": bool(uploaded_at),
@@ -1047,18 +1078,43 @@ def ensure_port_available(host: str, port: int) -> None:
     )
 
 
-def _serve_bundle():
+def _with_csrf_meta(document: str, token: str) -> str:
+    """Splice the CSRF meta tag the compiled client reads into the shell's head.
+
+    The console is a pre-built artifact, so nothing in the npm build can know a
+    per-session token; it has to be injected at serve time. The client reads
+    ``meta[name="csrf-token"]`` and sends it as ``X-CSRF-Token`` on every
+    non-GET request (see frontend/src/api.ts), which is what
+    ``_require_mutation_access`` compares against the session.
+    """
+    tag = f'<meta name="csrf-token" content="{html.escape(token, quote=True)}">'
+    head = document.find("<head>")
+    if head == -1:
+        return tag + document
+    cut = head + len("<head>")
+    return f"{document[:cut]}\n    {tag}{document[cut:]}"
+
+
+def _serve_bundle(with_csrf: bool = False):
     """Send the compiled React shell with a no-store header.
 
     The bundle is a single build that renders either the marketing landing page
     or the recovery console depending on the request path (see main.tsx). The
     shell names hashed asset files, so only the shell itself must stay uncached:
     a cached copy keeps loading a previous build's bundle forever.
+
+    ``with_csrf`` is set only for the operator console. The customer plan page
+    shares this bundle but authenticates with a bearer token in its URL and has
+    no session to protect, so it must not be handed an operator token.
     """
     bundle_index = ROOT / "static" / "clients" / "index.html"
     if not bundle_index.exists():
         return jsonify({"error": "Client console is not built. Run npm run build in frontend."}), 503
-    response = send_file(bundle_index)
+    document = bundle_index.read_text(encoding="utf-8")
+    if with_csrf:
+        document = _with_csrf_meta(document, _ensure_csrf_token())
+    response = make_response(document)
+    response.headers["Content-Type"] = "text/html; charset=utf-8"
     response.headers["Cache-Control"] = "no-store, must-revalidate"
     return response
 
@@ -1067,7 +1123,7 @@ def _serve_client_console():
     """Serve the compiled React console used by the dashboard entry points."""
     if DASHBOARD_PASSWORD and not session.get("dashboard_user"):
         return redirect(url_for("home"))
-    return _serve_bundle()
+    return _serve_bundle(with_csrf=True)
 
 
 @app.get("/clients")
