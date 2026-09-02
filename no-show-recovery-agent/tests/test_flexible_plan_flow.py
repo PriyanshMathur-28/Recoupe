@@ -19,6 +19,7 @@ heuristics, which is exactly the offline path CI runs.
 import hashlib
 import hmac
 import json
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 import pytest
@@ -58,9 +59,14 @@ def _open_plan(plan_db: Path) -> tuple[dict, str]:
 # --------------------------------------------------------------------------- #
 
 def test_schedule_inside_policy_is_approved():
+    now = datetime.now(timezone.utc)
     verdict = evaluate_plan_schedule(
         10000.0,
-        [{"amount": 3000, "due_date": "2026-09-01"}, {"amount": 7000, "due_date": "2026-09-04"}],
+        [
+            {"amount": 3000, "due_date": now.date().isoformat()},
+            {"amount": 7000, "due_date": (now + timedelta(days=3)).date().isoformat()},
+        ],
+        now=now,
     )
     assert verdict.approved is True
     assert verdict.total == 10000.0

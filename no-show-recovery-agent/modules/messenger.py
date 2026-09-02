@@ -14,6 +14,43 @@ from dotenv import load_dotenv
 ROOT = Path(__file__).resolve().parents[1]
 GMAIL_SCOPE = "https://www.googleapis.com/auth/gmail.send"
 DEFAULT_GMAIL_HTTP_TIMEOUT_SECONDS = 30.0
+REAUTHORIZE_HINT = "Re-authorize Gmail by running `python oauth_flow.py`, then retry."
+
+
+class GmailDeliveryError(RuntimeError):
+    """A safe, actionable failure raised by the Gmail delivery boundary.
+
+    Mirrors ``payments.PaymentLinkProviderError``: every way this boundary can
+    fail to hand a message to Gmail is reported as one type, so callers never
+    have to know that the underlying stack raises ``socket.timeout``,
+    ``googleapiclient.errors.HttpError`` or a ``google.auth`` error. Subclassing
+    ``RuntimeError`` keeps the existing broad handlers (the batch runner, the
+    bulk-send loop) treating it as the technical error it already was.
+    """
+
+
+class GmailAuthError(GmailDeliveryError):
+    """Gmail refused the stored credential; nothing was sent.
+
+    Distinct from every other delivery failure because it is *not* recoverable
+    in-process: the OAuth grant itself is gone (revoked, expired, or never
+    written), so retrying sends the same dead token. The only fix is a human
+    re-running ``oauth_flow.py``, which is exactly what the message says.
+    """
+
+
+def _auth_error_types() -> tuple[type[BaseException], ...]:
+    """Google's refresh-failure types, or ``()`` when google-auth is absent.
+
+    Lazy for the same reason ``_gmail_service`` imports lazily: no offline path
+    may require the Google packages. ``except ()`` matches nothing, so the
+    translation is simply inert when the library is not installed.
+    """
+    try:
+        from google.auth.exceptions import RefreshError
+    except ImportError:
+        return ()
+    return (RefreshError,)
 
 
 def _gmail_timeout_seconds() -> float:
@@ -40,7 +77,7 @@ def _gmail_service(service: Any = None) -> Any:
     if not token_path.is_absolute():
         token_path = ROOT / token_path
     if not token_path.exists():
-        raise RuntimeError("token.json is required for Gmail delivery")
+        raise GmailAuthError(f"token.json is required for Gmail delivery. {REAUTHORIZE_HINT}")
     credentials = Credentials.from_authorized_user_file(str(token_path), [GMAIL_SCOPE])
     transport = AuthorizedHttp(
         credentials,
@@ -63,7 +100,16 @@ def send_email(to_email: str, subject: str, body: str, service: Any = None, atta
         message = MIMEText(body, "plain", "utf-8")
     message["to"], message["subject"] = to_email, subject
     encoded = base64.urlsafe_b64encode(message.as_bytes()).decode("ascii")
-    return _gmail_service(service).users().messages().send(userId="me", body={"raw": encoded}).execute()
+    try:
+        return _gmail_service(service).users().messages().send(userId="me", body={"raw": encoded}).execute()
+    except GmailDeliveryError:
+        raise
+    except _auth_error_types() as exc:
+        # The token refresh happens lazily inside .execute(), so a revoked grant
+        # surfaces here rather than while the service is being built.
+        raise GmailAuthError(f"Gmail rejected the stored authorization: {exc}. {REAUTHORIZE_HINT} No email was sent.") from exc
+    except Exception as exc:  # noqa: BLE001 - this boundary owns one typed failure
+        raise GmailDeliveryError(f"Gmail could not send this email: {exc}") from exc
 
 
 def send_message(to_email: str, subject: str, body: str, payment_link: str | None = None, service: Any = None, attachment: dict[str, Any] | None = None) -> dict[str, Any]:

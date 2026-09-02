@@ -148,6 +148,8 @@ npm run check
 
 `modules/messenger.py` provides `send_email()` and `send_message()`. `send_message()` appends a payment link only when supplied. Live delivery requires a valid local `token.json`; tests inject a fake Gmail service and never send external mail. Gmail HTTP requests time out after 30 seconds by default. Set `GMAIL_HTTP_TIMEOUT_SECONDS` to a different positive number in `.env` when the deployment needs another deadline. A timeout escalates only the affected case as a technical error, and the batch continues processing later cases.
 
+Every way this boundary can fail to hand a message to Gmail is reported as one type, `GmailDeliveryError`, so no caller needs to know that the stack underneath raises `socket.timeout`, `googleapiclient.errors.HttpError`, or a `google.auth` error. Its subclass `GmailAuthError` marks the single failure that retrying cannot fix — the OAuth grant is missing, expired, or revoked — and says so by naming the remedy, `python oauth_flow.py`. Recipient validation happens *before* the transport, so an unusable address stays a plain `ValueError` and is never blamed on Gmail. Both delivery types subclass `RuntimeError`, so the batch runner and the bulk-send loop keep auditing them as the technical errors they already were, while `POST /api/clients/<id>/send-email` answers `503` with the machine-readable code `gmail_authorization_expired` or `gmail_unavailable` rather than a bare HTML 500 the console cannot parse.
+
 To manually verify the four action layouts in an inbox, generate each action message (`charge_fee`, `offer_waitlist`, `friendly_reminder`, and `retry_payment`) and pass it to `send_message()` with your own email. Live sends are intentionally not automated without credentials and an explicit recipient.
 
 ## Voice recovery (Vapi)
@@ -178,7 +180,7 @@ The `primary_channel` field from earlier drafts of the schema is intentionally a
 
 Live mode intentionally fails closed rather than silently substituting fake external effects:
 
-- Google OAuth credentials and a refreshable token are required for Calendar and Gmail. Calendar unavailability is logged and CSV detection continues; Gmail failure or request timeout escalates the affected action without consuming its payment-attempt budget, then processing continues with the next case.
+- Google OAuth credentials and a refreshable token are required for Calendar and Gmail. Calendar unavailability is logged and CSV detection continues; Gmail failure or request timeout escalates the affected action without consuming its payment-attempt budget, then processing continues with the next case. A grant that is gone rather than merely unreachable is separated out as `GmailAuthError`, because retrying it only resends the same dead token: the operator is told to re-run `python oauth_flow.py` instead of being shown a failure that looks transient.
 - LLM calls validate provider response shapes and fall back from Groq to Gemini when both are configured. If neither provider is available, live message generation fails and the case is escalated; preview mode uses a deterministic local message.
 - Razorpay credentials, webhook secret, network access, and a complete response containing both `id` and `short_url` are required for live payment actions. Failures escalate the case, create no recovered revenue, and consume no payment attempt.
 - SQLite, audit-log, token, and configuration paths require filesystem permissions. Startup/action errors are surfaced and audited where possible; operators must restore storage access before retrying.

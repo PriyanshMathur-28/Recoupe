@@ -197,6 +197,25 @@ def _rupees(amount: Any) -> str:
     return f"Rs {_money(amount):,.0f}"
 
 
+def business_facts(document: Any) -> list[str]:
+    """Extract safe structural facts for deterministic customer-facing copy.
+
+    The uploaded document remains reference material, never policy.  In
+    particular, this deliberately avoids echoing names, discounts, or arbitrary
+    prose from an untrusted document into the chat.
+    """
+    text = str(document or "")
+    lowered = text.lower()
+    facts: list[str] = []
+    if any(word in lowered for word in ("fitness", "wellness", "gym", "personal training")):
+        facts.append("The business provides fitness and wellness memberships and training services.")
+    if "monthly" in lowered and any(word in lowered for word in ("upfront", "annual", "yearly")):
+        facts.append("Its services may be billed upfront, monthly, or annually depending on the selected plan.")
+    if "installment" in lowered:
+        facts.append("Approved installment plans are available for eligible balances.")
+    return facts[:3]
+
+
 def build_context(
     plan: dict[str, Any],
     policy: dict[str, Any] | None = None,
@@ -215,8 +234,10 @@ def build_context(
     """
     rules = plan_policy() if policy is None else {**plan_policy(), **policy}
     amount = _money(plan.get("original_amount"))
+    background = prompt_block() if business is None else str(business or "")
     return {
-        "business": prompt_block() if business is None else str(business or ""),
+        "business": background,
+        "business_facts": business_facts(background),
         "case_id": str(plan.get("case_id") or ""),
         "invoice_id": str(plan.get("case_key") or ""),
         "customer_name": str(plan.get("client_name") or "").strip(),
@@ -245,44 +266,89 @@ def policy_sentence(context: dict[str, Any]) -> str:
     return "You can split this into " + ", ".join(parts) + "."
 
 
-def suggest_schedule(context: dict[str, Any], now: datetime | None = None) -> list[dict[str, Any]]:
-    """A schedule for THIS debt that the policy gate will accept.
-
-    Rules stated in the abstract ("a first payment of at least Rs 66") make the
-    customer solve the merchant's arithmetic before they can make an offer. This
-    turns the same rules into one concrete schedule they can accept or adjust,
-    which is the difference between a refusal and a negotiation.
-
-    Derived, never guessed: the split is arithmetic on the amount owed against
-    the same floors :func:`evaluate_plan_schedule` applies, so the suggestion is
-    always inside policy. It discounts nothing — the rows total the full debt.
-    """
+def suggest_plan_options(context: dict[str, Any], now: datetime | None = None) -> list[dict[str, Any]]:
+    """Return distinct alternatives already proven valid by the policy gate."""
     rules = context.get("policy") or plan_policy()
     amount = _money(context.get("original_amount"))
     if amount <= 0:
         return []
+
     today = _today(now)
     max_count = max(int(rules.get("max_installments") or 1), 1)
     window = max(int(rules.get("max_extension_days") or 0), 0)
-    per_row_floor = effective_min_installment(amount, rules)
+    minimum = effective_min_installment(amount, rules)
     first_floor = min_first_payment(amount, rules)
+    candidates: list[tuple[str, str, list[dict[str, Any]]]] = []
 
-    # Not divisible: no allowance, no time, or the two floors together exceed the
-    # debt. The most flexible thing left is the whole amount, later.
-    if max_count < 2 or window < 1 or amount < first_floor + per_row_floor:
-        return [{"amount": amount, "due_date": (today + timedelta(days=min(window, 7))).isoformat()}]
+    if max_count >= 3 and window >= 2 and amount >= first_floor + (2 * minimum):
+        rest = round(amount - first_floor, 2)
+        second = round(rest / 2, 2)
+        third = round(amount - first_floor - second, 2)
+        candidates.append(
+            (
+                "Lowest upfront",
+                "Start with the minimum eligible payment and spread the rest.",
+                [
+                    {"amount": first_floor, "due_date": today.isoformat()},
+                    {"amount": second, "due_date": (today + timedelta(days=max(1, window // 2))).isoformat()},
+                    {"amount": third, "due_date": (today + timedelta(days=window)).isoformat()},
+                ],
+            )
+        )
 
-    # Halve it, lift the first row to the floor, and keep whole rupees so the
-    # customer is quoted a figure they would actually type back.
-    first = float(math.ceil(max(first_floor, amount / 2)))
-    rest = round(amount - first, 2)
-    if rest < per_row_floor:
-        first = round(amount - per_row_floor, 2)
-        rest = per_row_floor
-    return [
-        {"amount": first, "due_date": today.isoformat()},
-        {"amount": rest, "due_date": (today + timedelta(days=min(window, 14))).isoformat()},
-    ]
+    if max_count >= 2 and window >= 1 and amount >= first_floor + minimum:
+        first = float(math.ceil(max(first_floor, amount / 2)))
+        rest = round(amount - first, 2)
+        if rest < minimum:
+            first, rest = round(amount - minimum, 2), minimum
+        candidates.append(
+            (
+                "Balanced split",
+                "Pay half now and clear the balance on the final date.",
+                [
+                    {"amount": first, "due_date": today.isoformat()},
+                    {"amount": rest, "due_date": (today + timedelta(days=window)).isoformat()},
+                ],
+            )
+        )
+
+    candidates.append(
+        (
+            "Single payment",
+            "Clear the full balance in one payment.",
+            [{"amount": amount, "due_date": (today + timedelta(days=window)).isoformat()}],
+        )
+    )
+
+    options: list[dict[str, Any]] = []
+    seen: set[str] = set()
+    for label, description, rows in candidates:
+        verdict = evaluate_plan_schedule(amount, rows, now=now, policy=rules)
+        if not verdict.approved:
+            continue
+        approved_rows = [dict(row) for row in verdict.installments]
+        summary = plan_summary_line(approved_rows)
+        if summary in seen:
+            continue
+        seen.add(summary)
+        options.append(
+            {
+                "label": label,
+                "description": description,
+                "summary": summary,
+                "installments": approved_rows,
+                "due_now": verdict.due_now,
+                "remaining": verdict.remaining,
+                "total": verdict.total,
+            }
+        )
+    return options
+
+
+def suggest_schedule(context: dict[str, Any], now: datetime | None = None) -> list[dict[str, Any]]:
+    """The first approved alternative, retained for existing copy and callers."""
+    options = suggest_plan_options(context, now)
+    return [dict(row) for row in options[0]["installments"]] if options else []
 
 
 def suggestion_sentence(context: dict[str, Any], now: datetime | None = None) -> str:
@@ -307,8 +373,11 @@ def opening_message(
     amount = _rupees(context["original_amount"])
     lines = [
         f"Hi {name}. I understand you'd like a flexible payment option for your outstanding {amount} payment.",
-        policy_sentence(context),
     ]
+    facts = context.get("business_facts") or []
+    if facts:
+        lines.append("Business context: " + " ".join(str(fact) for fact in facts))
+    lines.append(policy_sentence(context))
     if context["voice_hint"]:
         lines.append(f"On our call you mentioned: {context['voice_hint']}")
     if (suggestion := suggestion_sentence(context)):
@@ -473,6 +542,24 @@ def _amounts(text: str, amount_due: float) -> list[float]:
     return bare[:MAX_PARSED_INSTALLMENTS]
 
 
+def _is_confirmation_request(text: str) -> bool:
+    """Whether a customer is accepting the displayed plan or asking to pay it.
+
+    The browser still requires the server-approved schedule and an explicit
+    Confirm Plan press before a payment link is created. This reader merely
+    turns an unambiguous conversational agreement into that server-approved
+    confirmation state instead of replying with the policy again.
+    """
+    lowered = str(text or "").strip().lower()
+    return any(
+        phrase in lowered
+        for phrase in (
+            "confirm", "yes", "agreed", "go ahead", "ok", "okay", "haan", "ठीक",
+            "send payment link", "send the payment link", "send link", "payment link",
+        )
+    )
+
+
 def heuristic_proposal(message: str, context: dict[str, Any], now: datetime | None = None) -> dict[str, Any]:
     """Deterministic extraction, used whenever no model can be reached.
 
@@ -508,7 +595,7 @@ def heuristic_proposal(message: str, context: dict[str, Any], now: datetime | No
     if not rows:
         if any(word in lowered for word in ("how", "what", "which", "can i", "explain", "option")):
             intent = "question"
-        elif any(word in lowered for word in ("confirm", "yes", "agreed", "go ahead", "ok", "okay", "haan", "ठीक")):
+        elif _is_confirmation_request(text):
             intent = "confirm"
         elif any(word in lowered for word in ("no thanks", "cancel", "not interested", "forget it")):
             intent = "decline"
@@ -602,6 +689,25 @@ def extract_proposal(
         return heuristic_proposal(message, context, now)
     if result["intent"] == "propose" and not result["installments"]:
         return heuristic_proposal(message, context, now)
+
+    # Date phrases frequently appear before the amount they qualify, for example
+    # "66 now and next month 132". Retain the provider's extraction, but where
+    # the deterministic reader found the same payment figures, use its locally
+    # paired dates. This prevents an omitted second date becoming "today" and
+    # tripping the gate's strictly-increasing-date protection.
+    fallback = heuristic_proposal(message, context, now)
+    parsed_rows = fallback["installments"]
+    model_rows = result["installments"]
+    if (
+        parsed_rows
+        and len(parsed_rows) == len(model_rows)
+        and all(
+            parsed["amount"] == model["amount"]
+            for parsed, model in zip(parsed_rows, model_rows)
+        )
+    ):
+        for model, parsed in zip(model_rows, parsed_rows):
+            model["due_date"] = parsed["due_date"]
     return result
 
 
@@ -640,6 +746,17 @@ def price_rows(rows: list[dict[str, Any]], context: dict[str, Any], now: datetim
                     row["amount"] = round(row["amount"] + drift, 2)
                     break
     return priced
+
+
+def _approved_suggested_schedule(context: dict[str, Any], now: datetime | None = None) -> Any:
+    """Re-gate the displayed default before offering it for confirmation.
+
+    Suggested options are generated through the gate, but this second check
+    keeps the agreement path subject to the same authority boundary as a
+    customer-typed schedule.
+    """
+    rows = suggest_schedule(context, now)
+    return evaluate_plan_schedule(context["original_amount"], rows, now=now, policy=context.get("policy"))
 
 
 def _confirm_prompt(verdict: Any, summary: str) -> str:
@@ -808,6 +925,8 @@ def negotiate(
     turn: dict[str, Any] = {
         "reply": "",
         "intent": "other",
+        "plan_options": suggest_plan_options(context, now),
+        "business_facts": list(context.get("business_facts") or []),
         "installments": [],
         "summary": "",
         "total": 0.0,
@@ -836,17 +955,48 @@ def negotiate(
         )
         return turn
 
+    agreement = proposal["intent"] == "confirm" or _is_confirmation_request(message)
+    if not proposal["installments"] and agreement:
+        verdict = _approved_suggested_schedule(context, now)
+        if verdict.approved:
+            summary = plan_summary_line(verdict.installments)
+            turn.update({
+                "intent": "confirm",
+                "installments": [dict(row) for row in verdict.installments],
+                "summary": summary,
+                "total": verdict.total,
+                "due_now": verdict.due_now,
+                "remaining": verdict.remaining,
+                "approved": True,
+                "awaiting_confirmation": True,
+                "reason_code": verdict.reason_code,
+                "reason": verdict.reason,
+                "checks": [{"name": check.name, "passed": check.passed, "detail": check.detail} for check in verdict.checks],
+                "reply": _confirm_prompt(verdict, summary),
+            })
+            return turn
+
     if not proposal["installments"]:
         # No figure to gate. Answer in prose, but still put a concrete schedule
         # in front of them: "I can't pay this month" is an opening, not an end.
         turn["reply"] = proposal["reply"] or policy_sentence(context)
-        if proposal["intent"] != "confirm":
-            suggestion = suggestion_sentence(context, now)
-            turn["reply"] += f" {suggestion}" if suggestion else ""
-            turn["reply"] += " Tell me the amount you can pay now and when you'd clear the rest."
+        suggestion = suggestion_sentence(context, now)
+        turn["reply"] += f" {suggestion}" if suggestion else ""
+        turn["reply"] += " Tell me the amount you can pay now and when you'd clear the rest."
         return turn
 
     rows = price_rows(proposal["installments"], context, now)
+    suggested = suggest_schedule(context, now)
+    # A bare amount that equals the advertised first payment is an agreement to
+    # that option, not a request to discount the balance to that single amount.
+    if (
+        len(rows) == 1
+        and suggested
+        and abs(rows[0]["amount"] - suggested[0]["amount"]) < 0.01
+        and rows[0]["due_date"] == suggested[0]["due_date"]
+    ):
+        rows = suggested
+        turn["intent"] = "confirm"
     verdict = evaluate_plan_schedule(context["original_amount"], rows, now=now, policy=policy)
     summary = plan_summary_line(verdict.installments) if verdict.installments else ""
     turn.update({
@@ -987,6 +1137,25 @@ if __name__ == "__main__":  # pragma: no cover - manual verification
           "at least Rs 199" not in small_open, small_open)
     check("a small debt is offered a concrete split",
           "For example" in small_open or "option I can offer" in small_open, small_open)
+
+    mixed_order = negotiate(small_plan, "66 now and next month 133", caller=offline, now=moment)
+    check("a date before its amount stays paired with that amount",
+          mixed_order["approved"]
+          and [row["due_date"] for row in mixed_order["installments"]] == ["2026-09-01", "2026-10-01"],
+          str(mixed_order["installments"]))
+
+    agreed = negotiate(small_plan, "ok", caller=offline, now=moment)
+    check("an agreement presents the approved schedule for confirmation",
+          agreed["awaiting_confirmation"] and agreed["approved"] and "Confirm Plan" in agreed["reply"], agreed["reply"])
+
+    link_request = negotiate(small_plan, "please send the payment link", caller=offline, now=moment)
+    check("a payment-link request first presents the approved schedule",
+          link_request["awaiting_confirmation"] and link_request["approved"], link_request["reply"])
+
+    bare_first_amount = negotiate(small_plan, "66", caller=offline, now=moment)
+    check("the advertised first amount selects the full suggested schedule",
+          bare_first_amount["awaiting_confirmation"] and bare_first_amount["total"] == 199.0,
+          str(bare_first_amount["installments"]))
 
     split = negotiate(small_plan, "Rs 100 today and Rs 99 on Friday", caller=offline, now=moment)
     check("a small debt can be split at all", split["approved"], split["reason"])

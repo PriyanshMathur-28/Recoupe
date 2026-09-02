@@ -155,12 +155,38 @@ applies to every call including token refresh.
 honours `GOOGLE_TOKEN_FILE` and resolves relative paths against the project root, so the process's
 working directory cannot change which credentials are used.
 
+### `GmailDeliveryError` / `GmailAuthError`
+**Does** — The two typed failures this boundary is allowed to raise.
+`GmailDeliveryError` means the message could not be handed to Gmail; `GmailAuthError` (its subclass)
+means the stored credential itself was refused, so nothing was sent and retrying cannot help.
+**Advanced** — Both subclass `RuntimeError`, deliberately, so the broad handlers that already existed
+keep working unchanged: [`run_event`](../../batch_runner.py:128) still audits the case as
+`technical_error`, and the bulk-send loop still records a per-client failure. Typing the boundary
+changed how precisely a failure can be *described*, not which handler runs.
+**Unique** — Before this existed, the Gmail stack's own exceptions leaked through the delivery path
+untranslated. `google.auth.exceptions.RefreshError` is not a `TypeError`, `ValueError`, `RuntimeError`
+or `OSError`, so a revoked OAuth grant escaped every `except` clause on
+[`send_client_email_api`](../../dashboard.py:743) and Flask answered the console with an unparseable
+HTML 500. Covered by
+[`test_a_revoked_gmail_token_is_a_typed_auth_error_naming_the_fix`](../../tests/test_batch_runner.py:196).
+
+### `_auth_error_types() -> tuple[type[BaseException], ...]`
+**Does** — Returns `(RefreshError,)`, or `()` when `google-auth` is not importable.
+**Unique** — Preserves the lazy-import guarantee above. `except ()` matches nothing, so on a machine
+without the Google packages the translation is simply inert instead of raising `ImportError` from an
+exception handler.
+
 ### `send_email(to_email, subject, body, service=None, attachment=None) -> dict`
 **Does** — Sends a UTF-8 email through the Gmail API, optionally with one PDF attachment.
 **Advanced** — Builds `MIMEMultipart("mixed")` with a `MIMEText` body and a
 `MIMEApplication(_subtype="pdf")` part carrying a `Content-Disposition: attachment; filename=…`
 header — or a bare `MIMEText` when there is no attachment. Encoded with `urlsafe_b64encode` as the
 Gmail API requires.
+**Advanced** — The send is wrapped so every transport-level failure leaves as one of the two typed
+errors above. The wrapping starts *after* the recipient check, so an unusable address is still a plain
+`ValueError` — the operator's input, not Gmail's fault. The token refresh fires lazily inside
+`.execute()`, which is why the translation has to sit around the request and not around
+`_gmail_service`.
 **Unique** — Explicit `"utf-8"` on the text part. Hindi and Devanagari appear throughout this product
 (the voice agent speaks it); a default-encoded body would deliver mojibake.
 

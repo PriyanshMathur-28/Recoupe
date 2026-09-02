@@ -25,6 +25,7 @@ from modules.merchant_profile import (
     profile_status,
     save_profile,
 )
+from modules.messenger import GmailAuthError, GmailDeliveryError
 from modules.payments import PaymentLinkProviderError
 from modules.razorpay_webhooks import ingest_webhook, simulate_paid_webhook
 from modules.revenue_autopsy import analyze as analyze_revenue, build_context as build_revenue_context
@@ -742,16 +743,30 @@ def revenue_autopsy_chat_api():
 
 @app.post("/api/clients/<client_id>/send-email")
 def send_client_email_api(client_id: str):
-    """Deliver one current client case and persist the confirmed send."""
+    """Deliver one current client case and persist the confirmed send.
+
+    Status classes are split by *whose* problem it is. A request the operator
+    could have made differently (case not sendable, already sent) is a 4xx. A
+    provider or credential that is down is a 5xx with a machine-readable
+    ``code``, because the request was fine and retrying it unchanged is the
+    right move once the dependency is restored. Nothing here may escape as a
+    bare HTML 500: the console only renders the JSON ``error`` string.
+    """
     payload = request.get_json(silent=True) or {}
     try:
         result = _service().send_client_email(client_id, resend=bool(payload.get("resend")))
     except LookupError as exc:
         return jsonify({"error": str(exc)}), 404
+    except GmailAuthError as exc:
+        return jsonify({"error": str(exc), "code": "gmail_authorization_expired"}), 503
+    except GmailDeliveryError as exc:
+        return jsonify({"error": str(exc), "code": "gmail_unavailable"}), 503
     except PaymentLinkProviderError as exc:
         return jsonify({"error": str(exc), "code": "payment_link_unavailable"}), 503
-    except (TypeError, ValueError, RuntimeError) as exc:
+    except ValueError as exc:
         return jsonify({"error": str(exc)}), 400
+    except (TypeError, RuntimeError) as exc:
+        return jsonify({"error": str(exc), "code": "delivery_failed"}), 503
     return jsonify(result)
 
 
@@ -918,7 +933,7 @@ def _plan_for_token(token: str):
 def _plan_snapshot(plan: dict[str, Any]) -> dict[str, Any]:
     """The customer's own view of their plan. No case internals, no operator data."""
     from modules.flexible_plans import display_status, is_expired
-    from modules.plan_chat import build_context, opening_message, policy_sentence
+    from modules.plan_chat import build_context, opening_message, policy_sentence, suggest_plan_options
 
     context = build_context(plan)
     first_unpaid = next((row for row in plan["installments"] if row["status"] != "paid"), None)
@@ -935,6 +950,8 @@ def _plan_snapshot(plan: dict[str, Any]) -> dict[str, Any]:
         "plan_summary": plan["plan_summary"],
         "installments": plan["installments"],
         "policy": policy_sentence(context),
+        "business_facts": list(context.get("business_facts") or []),
+        "plan_options": suggest_plan_options(context),
         "opening_message": opening_message(plan),
         "pay_url": str((first_unpaid or {}).get("link_url") or ""),
         "confirmed": plan["status"] in {"confirmed", "link_sent", "active", "completed"},

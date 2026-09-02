@@ -8,6 +8,7 @@ from pathlib import Path
 
 from dashboard import app, calculate_metrics
 from main import create_scheduler, process_event
+from modules.messenger import GmailAuthError, GmailDeliveryError
 from modules.payments import PaymentLinkProviderError
 from modules.service_layer import RecoveryService
 
@@ -146,6 +147,64 @@ def test_send_email_reports_payment_provider_limit_without_http_500(monkeypatch)
         "code": "payment_link_unavailable",
         "error": "Razorpay Test Mode has reached its payment-link limit. No email was sent.",
     }
+
+
+def _send_email_failing_with(error: Exception):
+    """A service stub whose only current-case send raises ``error``."""
+
+    class FailingService:
+        def send_client_email(self, client_id, resend=False):
+            raise error
+
+    return FailingService()
+
+
+def test_send_email_reports_expired_gmail_authorization_without_http_500(monkeypatch):
+    """A revoked OAuth grant is a named 503, never a bare HTML 500.
+
+    The refresh happens lazily inside the Gmail request, so before this was
+    typed the failure was a ``google.auth`` ``RefreshError`` — outside the
+    route's except tuple — and Flask answered with an unparseable HTML 500 that
+    told the operator nothing about what to do.
+    """
+    monkeypatch.setattr(
+        "dashboard._service",
+        lambda: _send_email_failing_with(
+            GmailAuthError("Gmail rejected the stored authorization: invalid_grant. Re-authorize Gmail by running `python oauth_flow.py`, then retry. No email was sent.")
+        ),
+    )
+    response = app.test_client().post("/api/clients/NS001/send-email", json={})
+
+    assert response.status_code == 503
+    body = response.get_json()
+    assert body["code"] == "gmail_authorization_expired"
+    assert "oauth_flow.py" in body["error"]
+
+
+def test_send_email_reports_a_gmail_outage_without_http_500(monkeypatch):
+    monkeypatch.setattr("dashboard._service", lambda: _send_email_failing_with(GmailDeliveryError("Gmail could not send this email: Gmail request timed out")))
+    response = app.test_client().post("/api/clients/NS001/send-email", json={})
+
+    assert response.status_code == 503
+    assert response.get_json()["code"] == "gmail_unavailable"
+
+
+def test_send_email_separates_the_operator_s_mistake_from_a_broken_dependency(monkeypatch):
+    """Only a request the operator could have made differently is a 4xx.
+
+    ``ValueError`` means this case was not sendable; a dead LLM provider or an
+    unreadable Gmail timeout setting arrives as ``RuntimeError`` and is the
+    server's problem, so it must not be reported as ``400 BAD REQUEST``.
+    """
+    monkeypatch.setattr("dashboard._service", lambda: _send_email_failing_with(ValueError("Email has already been sent for this case")))
+    refused = app.test_client().post("/api/clients/NS001/send-email", json={})
+    assert refused.status_code == 400
+    assert refused.get_json() == {"error": "Email has already been sent for this case"}
+
+    monkeypatch.setattr("dashboard._service", lambda: _send_email_failing_with(RuntimeError("All configured LLM providers failed: groq timeout")))
+    broken = app.test_client().post("/api/clients/NS001/send-email", json={})
+    assert broken.status_code == 503
+    assert broken.get_json()["code"] == "delivery_failed"
 
 
 def test_dashboard_mutations_fail_closed_without_credentials(monkeypatch):

@@ -8,7 +8,7 @@ import sqlite3
 import pytest
 
 from batch_runner import run_batch, run_event, summarize_results
-from modules.messenger import _gmail_timeout_seconds
+from modules.messenger import GmailAuthError, GmailDeliveryError, _gmail_timeout_seconds, send_email
 from modules.attempt_tracker import check_escalation, get_attempt_count
 from modules.detector import get_all_risk_events
 
@@ -168,6 +168,73 @@ def test_gmail_timeout_requires_a_positive_number(monkeypatch):
         monkeypatch.setenv("GMAIL_HTTP_TIMEOUT_SECONDS", value)
         with pytest.raises(RuntimeError, match="must be a positive number"):
             _gmail_timeout_seconds()
+
+
+def _gmail_raising(error: Exception):
+    """A minimal Gmail service stub whose send request raises ``error``."""
+
+    class Request:
+        def execute(self):
+            raise error
+
+    class Messages:
+        def send(self, **kwargs):
+            return Request()
+
+    class Users:
+        def messages(self):
+            return Messages()
+
+    class Gmail:
+        def users(self):
+            return Users()
+
+    return Gmail()
+
+
+def test_gmail_delivery_errors_stay_runtime_errors():
+    """Existing broad handlers must keep treating these as technical errors.
+
+    ``run_event`` and the bulk-send loop already catch every failure and audit it
+    as ``technical_error``; typing the Gmail boundary must not change which
+    handler runs, only how precisely the failure can be described.
+    """
+    assert issubclass(GmailAuthError, GmailDeliveryError)
+    assert issubclass(GmailDeliveryError, RuntimeError)
+
+
+def test_a_revoked_gmail_token_is_a_typed_auth_error_naming_the_fix():
+    """The refresh fires inside ``.execute()``, so it must be caught there.
+
+    Untyped, this escaped every ``except`` clause on the dashboard's send route
+    and surfaced as a bare HTTP 500 with no instruction for the operator.
+    """
+    exceptions = pytest.importorskip("google.auth.exceptions")
+    service = _gmail_raising(exceptions.RefreshError("invalid_grant: Token has been expired or revoked."))
+
+    with pytest.raises(GmailAuthError) as caught:
+        send_email("client@example.com", "Payment retry", "Please retry.", service=service)
+
+    message = str(caught.value)
+    assert "invalid_grant" in message
+    assert "oauth_flow.py" in message
+    assert "No email was sent" in message
+
+
+def test_a_gmail_transport_failure_is_reported_as_one_delivery_error():
+    service = _gmail_raising(socket.timeout("Gmail request timed out"))
+
+    with pytest.raises(GmailDeliveryError) as caught:
+        send_email("client@example.com", "Payment retry", "Please retry.", service=service)
+
+    assert "timed out" in str(caught.value)
+    assert not isinstance(caught.value, GmailAuthError)
+
+
+def test_an_unusable_recipient_is_still_a_plain_value_error():
+    """Validation precedes the transport, so a bad address is not a Gmail fault."""
+    with pytest.raises(ValueError, match="valid recipient email"):
+        send_email("not-an-address", "Payment retry", "Please retry.", service=_gmail_raising(RuntimeError("unreachable")))
 
 
 def test_live_batch_continues_after_gmail_timeout(tmp_path):

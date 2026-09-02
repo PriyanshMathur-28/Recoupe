@@ -32,6 +32,16 @@ export interface PlanInstallment {
 }
 
 /** The plan as its own customer may see it. No case internals, no operator state. */
+export interface PlanOption {
+    label: string;
+    description: string;
+    summary: string;
+    installments: PlanInstallment[];
+    due_now: number;
+    remaining: number;
+    total: number;
+}
+
 export interface PlanSnapshot {
     customer_name: string;
     original_amount: number;
@@ -48,6 +58,8 @@ export interface PlanSnapshot {
     opening_message: string;
     pay_url: string;
     confirmed: boolean;
+    business_facts?: string[];
+    plan_options?: PlanOption[];
 }
 
 /** One assistant turn, exactly as `modules.plan_chat.negotiate` returned it. */
@@ -237,6 +249,26 @@ export function FlexiblePlanChat() {
         setTurns((current) => [...current, { role: "assistant", text: "No problem. Tell me the amount you can pay now and when you'd clear the rest." }]);
     }, []);
 
+    const chooseOption = useCallback((option: PlanOption) => {
+        const assistantText = `I recommend: ${option.summary}`;
+        const turn: PlanTurn = {
+            reply: assistantText,
+            intent: "propose",
+            installments: option.installments.map((r, i) => ({ ...r, index: r.index ?? i + 1 })),
+            summary: option.summary,
+            total: option.total,
+            due_now: option.due_now,
+            remaining: option.remaining,
+            approved: true,
+            awaiting_confirmation: true,
+            reason_code: "",
+            reason: "",
+            source: "suggestion",
+        };
+        setPending(turn);
+        setTurns((current) => [...current, { role: "assistant", text: assistantText }]);
+    }, []);
+
     if (loadError) {
         return (
             <main className="flex h-[100dvh] items-center justify-center bg-background p-6 text-text-primary">
@@ -280,17 +312,17 @@ export function FlexiblePlanChat() {
      * URL bar in `vh`, which is precisely how a composer ends up under it.
      */
     return (
-        <main className="flex h-[100dvh] justify-center bg-background text-text-primary sm:p-6">
-            <div className="flex h-full w-full max-w-2xl flex-col overflow-hidden border-border-slate bg-surface sm:rounded-2xl sm:border sm:shadow-sm">
+        <main className="flex h-[100dvh] w-full bg-background text-text-primary">
+            <div className="flex h-full w-full flex-col overflow-hidden bg-surface-container-lowest">
                 {/* Slim and always on screen: who this is for and what is still owed. */}
-                <header className="flex shrink-0 items-center justify-between gap-3 border-b border-border-slate px-4 py-3">
+                <header className="flex shrink-0 items-center justify-between gap-4 border-b border-border-slate px-5 py-4 sm:px-8">
                     <div className="min-w-0">
-                        <p className="truncate text-[11px] font-semibold uppercase tracking-wider text-action-indigo">Flexible Payment Plan</p>
-                        <h1 className="truncate text-base font-semibold tracking-tight sm:text-lg">Hi {snapshot.customer_name}</h1>
+                        <p className="truncate text-xs font-semibold uppercase tracking-wider text-action-indigo sm:text-sm">Flexible Payment Plan</p>
+                        <h1 className="truncate text-xl font-semibold tracking-tight sm:text-2xl">Hi {snapshot.customer_name}</h1>
                     </div>
                     <div className="flex shrink-0 flex-col items-end gap-1">
-                        <span className="rounded-full bg-surface-container-high px-2.5 py-0.5 text-[11px] font-medium text-text-muted">{snapshot.status_label}</span>
-                        <span className="text-xs text-text-muted">
+                        <span className="rounded-full bg-surface-container-high px-3 py-1 text-xs font-medium text-text-muted sm:text-sm">{snapshot.status_label}</span>
+                        <span className="text-sm text-text-muted">
                             Remaining <strong className="font-semibold text-text-primary">{formatInr(snapshot.amount_remaining)}</strong>
                         </span>
                     </div>
@@ -298,32 +330,60 @@ export function FlexiblePlanChat() {
 
                 {/* The only scroll in the page. The account details lead it, so they are
                     reachable by scrolling up instead of permanently occupying height. */}
-                <div ref={streamRef} className="min-h-0 flex-1 overflow-y-auto overscroll-contain px-4 py-4" aria-label="Payment plan conversation">
-                    <div className="rounded-xl border border-border-slate bg-surface-subtle px-4 py-3">
-                        <dl className="grid grid-cols-3 gap-x-4 gap-y-2 text-sm">
+                <div ref={streamRef} className="min-h-0 flex-1 overflow-y-auto overscroll-contain px-5 py-5 sm:px-8 sm:py-6" aria-label="Payment plan conversation">
+                    <div className="rounded-xl border border-border-slate bg-surface-subtle px-5 py-4">
+                        <dl className="grid grid-cols-1 gap-3 text-base sm:grid-cols-3 sm:gap-x-6 sm:gap-y-2">
                             <div>
-                                <dt className="text-xs text-text-muted">Original</dt>
+                                <dt className="text-sm text-text-muted">Original</dt>
                                 <dd className="font-semibold">{formatInr(snapshot.original_amount)}</dd>
                             </div>
                             <div>
-                                <dt className="text-xs text-text-muted">Paid so far</dt>
+                                <dt className="text-sm text-text-muted">Paid so far</dt>
                                 <dd className="font-semibold text-success">{formatInr(snapshot.amount_paid)}</dd>
                             </div>
                             <div>
-                                <dt className="text-xs text-text-muted">Remaining</dt>
+                                <dt className="text-sm text-text-muted">Remaining</dt>
                                 <dd className="font-semibold">{formatInr(snapshot.amount_remaining)}</dd>
                             </div>
                         </dl>
-                        {snapshot.plan_summary && <p className="mt-3 text-sm text-text-muted">Your plan: {snapshot.plan_summary}</p>}
-                        <p className="mt-2 text-xs text-text-muted">{snapshot.policy}</p>
-                        <p className="mt-2 text-xs text-text-muted">This link is private to you and expires. Please don't forward it.</p>
+                        {snapshot.plan_summary && <p className="mt-4 text-base text-text-muted">Your plan: {snapshot.plan_summary}</p>}
+                        <p className="mt-3 text-sm text-text-muted sm:text-base">{snapshot.policy}</p>
+                        <p className="mt-3 text-sm text-text-muted">This link is private to you and expires. Please don't forward it.</p>
                     </div>
 
-                    <div className="mt-4 flex flex-col gap-3" role="log" aria-live="polite">
+                    {snapshot.plan_options && snapshot.plan_options.length > 0 && !pending && (
+                        <div className="mt-5 grid grid-cols-1 gap-4 lg:grid-cols-3" aria-label="Suggested plans">
+                            {snapshot.plan_options.map((opt, i) => (
+                                <div key={i} className="rounded-xl border border-border-slate bg-surface px-4 py-4">
+                                    <div className="flex items-start justify-between">
+                                        <div>
+                                            <p className="text-base font-semibold">{opt.label}</p>
+                                            <p className="mt-1 text-sm text-text-muted">{opt.description}</p>
+                                        </div>
+                                        <div className="text-right">
+                                            <p className="text-base font-semibold">{formatInr(opt.total)}</p>
+                                            <p className="text-sm text-text-muted">Due now {formatInr(opt.due_now)}</p>
+                                        </div>
+                                    </div>
+                                    <p className="mt-4 text-sm text-text-muted">{opt.summary}</p>
+                                    <div className="mt-4 flex gap-3">
+                                        <button type="button" className="flex-1 rounded-lg bg-action-indigo px-3 py-2.5 text-base font-semibold text-white" onClick={() => chooseOption(opt)}>
+                                            Choose
+                                        </button>
+                                        <button type="button" className="flex-1 rounded-lg border border-border-slate bg-surface px-3 py-2.5 text-base font-medium" onClick={() => setTurns((current) => [...current, { role: "assistant", text: `Option: ${opt.summary}` }])}>
+                                            View
+                                        </button>
+                                    </div>
+                                </div>
+                            ))}
+                        </div>
+                    )}
+
+                    <div className="mt-5 flex flex-col gap-4" role="log" aria-live="polite">
                         {turns.map((turn, index) => (
                             <div key={index} className={`flex ${turn.role === "customer" ? "justify-end" : "justify-start"}`}>
                                 <p
-                                    className={`max-w-[85%] whitespace-pre-line break-words rounded-2xl px-4 py-2.5 text-sm ${turn.role === "customer" ? "bg-action-indigo text-white" : "bg-surface-container-low text-text-primary"
+                                    className={`max-w-[92%] whitespace-pre-line break-words rounded-2xl px-5 py-3 text-base leading-7 sm:max-w-[80%] ${turn.role === "customer" ? "bg-action-indigo text-white" : "bg-surface-container-low text-text-primary"
                                         }`}
                                 >
                                     {turn.text}
@@ -331,7 +391,7 @@ export function FlexiblePlanChat() {
                             </div>
                         ))}
                         {thinking && (
-                            <p className="text-xs text-text-muted" aria-live="polite">
+                            <p className="text-sm text-text-muted" aria-live="polite">
                                 Working out your plan…
                             </p>
                         )}
@@ -341,9 +401,9 @@ export function FlexiblePlanChat() {
                 {/* Everything below is pinned. A long schedule scrolls inside its own
                     panel so the two buttons under it stay on screen regardless. */}
                 {pending && (
-                    <div className="max-h-[45dvh] shrink-0 overflow-y-auto border-t border-border-slate bg-surface-subtle px-4 py-4">
-                        <p className="text-[11px] font-semibold uppercase tracking-wider text-text-muted">Plan summary</p>
-                        <ul className="mt-2 flex flex-col gap-1 text-sm">
+                    <div className="max-h-[45dvh] shrink-0 overflow-y-auto border-t border-border-slate bg-surface-subtle px-5 py-5 sm:px-8">
+                        <p className="text-xs font-semibold uppercase tracking-wider text-text-muted sm:text-sm">Plan summary</p>
+                        <ul className="mt-3 flex flex-col gap-2 text-base">
                             {pending.installments.map((row) => (
                                 <li key={row.index} className="flex items-center justify-between gap-4">
                                     <span className="text-text-muted">
@@ -353,13 +413,13 @@ export function FlexiblePlanChat() {
                                 </li>
                             ))}
                         </ul>
-                        <p className="mt-2 text-xs text-text-muted">
+                        <p className="mt-3 text-sm text-text-muted sm:text-base">
                             Due now {formatInr(pending.due_now)} · Remaining {formatInr(pending.remaining)} · Total {formatInr(pending.total)}
                         </p>
                         <div className="mt-4 flex flex-col gap-2 sm:flex-row">
                             <button
                                 type="button"
-                                className="w-full rounded-lg bg-action-indigo px-4 py-2.5 text-sm font-semibold text-white disabled:opacity-60 sm:w-auto"
+                                className="w-full rounded-lg bg-action-indigo px-5 py-3 text-base font-semibold text-white disabled:opacity-60 sm:w-auto"
                                 onClick={() => void confirmPlan()}
                                 disabled={confirming}
                             >
@@ -367,25 +427,25 @@ export function FlexiblePlanChat() {
                             </button>
                             <button
                                 type="button"
-                                className="w-full rounded-lg border border-border-slate bg-surface px-4 py-2.5 text-sm font-medium hover:bg-surface-container-low disabled:opacity-60 sm:w-auto"
+                                className="w-full rounded-lg border border-border-slate bg-surface px-5 py-3 text-base font-medium hover:bg-surface-container-low disabled:opacity-60 sm:w-auto"
                                 onClick={changePlan}
                                 disabled={confirming}
                             >
                                 Change Plan
                             </button>
                         </div>
-                        {notice && <p className="mt-3 text-sm text-error">{notice}</p>}
+                        {notice && <p className="mt-3 text-base text-error">{notice}</p>}
                     </div>
                 )}
 
                 {payUrl && (
-                    <div className="shrink-0 border-t border-border-slate bg-success/5 px-4 py-4">
-                        <p className="text-sm font-medium">Your plan is confirmed.</p>
-                        <p className="mt-1 text-xs text-text-muted">
+                    <div className="shrink-0 border-t border-border-slate bg-success/5 px-5 py-5 sm:px-8">
+                        <p className="text-base font-medium">Your plan is confirmed.</p>
+                        <p className="mt-1 text-sm text-text-muted">
                             {emailed ? "We've emailed this payment link to you as well." : "Use the button below to pay your first installment."}
                         </p>
                         <a
-                            className="mt-3 inline-flex w-full items-center justify-center gap-2 rounded-lg bg-success px-4 py-2.5 text-sm font-semibold text-white sm:w-auto"
+                            className="mt-4 inline-flex w-full items-center justify-center gap-2 rounded-lg bg-success px-5 py-3 text-base font-semibold text-white sm:w-auto"
                             href={payUrl}
                             target="_blank"
                             rel="noreferrer noopener"
@@ -399,7 +459,7 @@ export function FlexiblePlanChat() {
                 )}
 
                 <form
-                    className="flex shrink-0 items-center gap-2 border-t border-border-slate px-4 py-3"
+                    className="flex shrink-0 items-center gap-3 border-t border-border-slate px-5 py-4 sm:px-8"
                     // Keeps the box clear of the iOS home indicator.
                     style={{ paddingBottom: "calc(0.75rem + env(safe-area-inset-bottom))" }}
                     onSubmit={(event) => {
@@ -414,7 +474,7 @@ export function FlexiblePlanChat() {
                         16px, which shifts the whole layout sideways mid-conversation. */}
                     <input
                         id="plan-message"
-                        className="min-w-0 flex-1 rounded-lg border border-border-slate bg-surface-subtle px-3 py-2 text-base outline-none focus:border-action-indigo focus:ring-1 focus:ring-action-indigo sm:text-sm"
+                        className="min-w-0 flex-1 rounded-lg border border-border-slate bg-surface-subtle px-4 py-3 text-base outline-none focus:border-action-indigo focus:ring-1 focus:ring-action-indigo sm:text-lg"
                         value={draft}
                         onChange={(event) => setDraft(event.target.value)}
                         placeholder={locked ? "This plan is already running." : "e.g. I can pay ₹3,000 today and the rest on Friday"}
@@ -423,7 +483,7 @@ export function FlexiblePlanChat() {
                     />
                     <button
                         type="submit"
-                        className="shrink-0 rounded-lg bg-action-indigo px-4 py-2.5 text-sm font-semibold text-white disabled:opacity-60"
+                        className="shrink-0 rounded-lg bg-action-indigo px-5 py-3 text-base font-semibold text-white disabled:opacity-60"
                         disabled={thinking || locked || !draft.trim()}
                     >
                         Send
