@@ -1,12 +1,8 @@
-"""Deterministic intervention rules for detected revenue-risk events."""
 from __future__ import annotations
 
 import math
 from typing import Any
 
-# Subscriptions above this INR threshold require human sign-off before an
-# automated retry. This surfaces as an explicit "high_value" escalation reason
-# in the decision output so the drawer can show the rule that fired.
 HIGH_VALUE_THRESHOLD = 5000.0
 
 
