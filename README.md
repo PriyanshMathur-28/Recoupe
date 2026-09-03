@@ -150,41 +150,9 @@ logs/             audit_log.sqlite3 (record) + .csv/.json (projections)
 docs/  tests/     Function reference · 12 pytest modules
 ```
 
-## The policy gate
-
-```python
-CONFIDENCE_AUTO_APPROVE       = 0.75
-CONFIDENCE_ESCALATE_BELOW     = 0.50
-AMOUNT_HUMAN_REVIEW_THRESHOLD = 50000.0      # money size, not model certainty
-CONTACT_WINDOW                = 08:00–22:00 IST
-MAX_RECOVERY_WINDOW_DAYS      = 14
-RETRY_LADDER_HOURS            = (24, 72, 168)
-MAX_ATTEMPTS, COOLDOWN_HOURS  = 3, 24
-```
-
-Fourteen checks fire in order; the first failure returns.
-
-- **Escalate to a human:** `data_validation`, `proposal_schema`, `action_allow_list`,
-  `consent_opt_out`, `confidence_floor`, `amount_ceiling`, `cost_to_collect_floor`,
-  `decline_action_match`, `recovery_window`, `attempt_cap`.
-- **Defer, stays automated with a `next_attempt_at`:** `promise_to_pay`, `contact_window`,
-  `retry_ladder`, `idempotency` (claimed last, so a rejected case never burns its key).
-
-`decline_action_match` is where the model is stopped from reversing a fact: a hard decline means the
-instrument is dead, so re-charging it cannot work however confident the proposal was.
-
-Repeated contact escalates in tone, not volume: `resend_payment_link` → `firm_reminder` →
-`final_notice` → human. `BANNED_PHRASES` blocks *legal action, lawyer, police, court, blacklist,
-defaulter, recovery agent, credit score, seize, criminal, consequences will, last warning* before
-delivery — a firm-reminder prompt is exactly where a model turns into a threat.
-
-Attempt counters are keyed `(client_id, action_scope)`, so payment and voice budget separately, and
-they increment only **after** a provider accepts. A policy escalation or technical error never
-consumes the budget.
-
 ## Channels in brief
 
-**Voice (Vapi).** `POST /api/voice/start-call` opens a `call_log` row *before* dialling, so an attempt
+**Voice.** `POST /api/voice/start-call` opens a `call_log` row *before* dialling, so an attempt
 exists even if everything after fails. Outcome in three steps: answered? → classify
 (`promised_to_pay | declined | no_answer | escalated`) → email, and only a promise may send. Terminal
 facts arrive from the browser or the server webhook; whichever lands first wins, because `close_call`
@@ -218,6 +186,7 @@ only; `policy_engine` never reads it.
 | `data/recovered_cases.sqlite3` | Confirmed recoveries with attribution |
 | `logs/audit_log.sqlite3` + `.csv` + `.json` | Store of record + projections |
 
+<<<<<<< HEAD
 The audit row is 26 columns (12 legacy fields pinned first, then 14 policy fields), so one row answers
 all four audit questions: what the model proposed, what the gate decided, which rule decided it, and
 whether the customer was contacted. Tables self-widen on connect via `ALTER TABLE` — no migration step.
@@ -234,15 +203,20 @@ Live mode fails closed rather than faking external effects.
   `PaymentLinkLimitError` and degrades to a message-only send.
 - **Vapi** → refuses rather than simulating; no webhook secret means server pushes aren't trusted.
 
+=======
+>>>>>>> 4614a87c8be0523fc94dcf3888c0f672c1c275d7
 ## Testing
 
 ```bat
 python -m pytest
 npm run check      :: inspect → pytest → compileall → validate_csv → repo:check
 ```
+<<<<<<< HEAD
 
 Current state: **344 passed, 6 failed.** All six read the real `data/recovery_cases.csv` instead of a
 fixture, so they fail whenever that file is absent — exactly the state `run_all.py` leaves behind.
 Restore or upload a case CSV first. Live delivery is never exercised: Gmail, Razorpay and Vapi are
 injected as fakes, and `conftest.py` pins the contact-window clock so the suite doesn't fail at
 23:00 IST.
+=======
+>>>>>>> 4614a87c8be0523fc94dcf3888c0f672c1c275d7
