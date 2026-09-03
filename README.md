@@ -134,41 +134,9 @@ logs/             audit_log.sqlite3 (record) + .csv/.json (projections)
 docs/  tests/     Function reference · 12 pytest modules
 ```
 
-## The policy gate
-
-```python
-CONFIDENCE_AUTO_APPROVE       = 0.75
-CONFIDENCE_ESCALATE_BELOW     = 0.50
-AMOUNT_HUMAN_REVIEW_THRESHOLD = 50000.0      # money size, not model certainty
-CONTACT_WINDOW                = 08:00–22:00 IST
-MAX_RECOVERY_WINDOW_DAYS      = 14
-RETRY_LADDER_HOURS            = (24, 72, 168)
-MAX_ATTEMPTS, COOLDOWN_HOURS  = 3, 24
-```
-
-Fourteen checks fire in order; the first failure returns.
-
-- **Escalate to a human:** `data_validation`, `proposal_schema`, `action_allow_list`,
-  `consent_opt_out`, `confidence_floor`, `amount_ceiling`, `cost_to_collect_floor`,
-  `decline_action_match`, `recovery_window`, `attempt_cap`.
-- **Defer, stays automated with a `next_attempt_at`:** `promise_to_pay`, `contact_window`,
-  `retry_ladder`, `idempotency` (claimed last, so a rejected case never burns its key).
-
-`decline_action_match` is where the model is stopped from reversing a fact: a hard decline means the
-instrument is dead, so re-charging it cannot work however confident the proposal was.
-
-Repeated contact escalates in tone, not volume: `resend_payment_link` → `firm_reminder` →
-`final_notice` → human. `BANNED_PHRASES` blocks *legal action, lawyer, police, court, blacklist,
-defaulter, recovery agent, credit score, seize, criminal, consequences will, last warning* before
-delivery — a firm-reminder prompt is exactly where a model turns into a threat.
-
-Attempt counters are keyed `(client_id, action_scope)`, so payment and voice budget separately, and
-they increment only **after** a provider accepts. A policy escalation or technical error never
-consumes the budget.
-
 ## Channels in brief
 
-**Voice (Vapi).** `POST /api/voice/start-call` opens a `call_log` row *before* dialling, so an attempt
+**Voice.** `POST /api/voice/start-call` opens a `call_log` row *before* dialling, so an attempt
 exists even if everything after fails. Outcome in three steps: answered? → classify
 (`promised_to_pay | declined | no_answer | escalated`) → email, and only a promise may send. Terminal
 facts arrive from the browser or the server webhook; whichever lands first wins, because `close_call`
@@ -188,37 +156,6 @@ model's job. Trimmed evidence sets `evidence_scope.complete = false` so the mode
 never executes a recovery action from chat. The merchant's uploaded business document grounds *tone*
 only; `policy_engine` never reads it.
 
-## HTTP surface
-
-Pages: `GET /` (public landing), `/dashboard` + `/clients` (session-gated),
-`/recover/flexible-plan/<token>` (customer, bearer token), `/login`, `/logout`.
-
-Reads: `/api/clients`, `/api/clients/<id>/calls`, `/api/clients/<id>/audit-export`,
-`/api/data-status`, `/api/merchant-profile`, `/api/revenue-autopsy/context`, `/api/voice/config`
-(never the private key), `/api/voice/metrics`, `/api/flexible-plan/<token>`.
-
-Webhooks: `POST /webhooks/razorpay` verifies HMAC-SHA256 over the raw body in constant time and
-dedupes on `X-Razorpay-Event-Id`. `POST /webhooks/vapi` checks `X-Vapi-Secret`.
-
-Mutations, by what the server actually enforces:
-
-| Enforcement | Routes |
-|---|---|
-| Session + CSRF | `POST`/`DELETE /api/merchant-profile`, `/dashboard/review/<id>/resolve`, `/dashboard/cases/retry`, `/dashboard/waitlist*` |
-| Session only | `POST /api/upload-csv` |
-| **Neither** | `/api/clients/<id>/send-email`, `/api/clients/send-bulk`, `/api/clients/<id>/simulate-recovery`, `/api/revenue-autopsy/chat`, `/api/voice/start-call`, `/api/voice/complete-call` |
-| Bearer token by design | `/api/flexible-plan/<token>/chat`, `/api/flexible-plan/<token>/confirm` |
-
-> **Security gap, not a design choice.** Those six unenforced routes include every route that emails a
-> customer, mints a link, or writes a recovery record. The console sends `X-CSRF-Token`; those
-> handlers never verify it. Keep the app on `127.0.0.1` (the default) or add
-> `_require_mutation_access()` before exposing it. There is also no rate limiting, and
-> `DASHBOARD_PASSWORD` is a single shared credential.
-
-`send-email` does get error semantics right: operator-fixable → 4xx; dependency down → `503` with a
-machine-readable `code` (`gmail_authorization_expired`, `gmail_unavailable`,
-`payment_link_unavailable`, `delivery_failed`). Nothing escapes as a bare HTML 500.
-
 ## Storage
 
 | Path | Contents |
@@ -233,31 +170,6 @@ machine-readable `code` (`gmail_authorization_expired`, `gmail_unavailable`,
 | `data/recovered_cases.sqlite3` | Confirmed recoveries with attribution |
 | `logs/audit_log.sqlite3` + `.csv` + `.json` | Store of record + projections |
 
-The audit row is 26 columns (12 legacy fields pinned first, then 14 policy fields), so one row answers
-all four audit questions: what the model proposed, what the gate decided, which rule decided it, and
-whether the customer was contacted. Tables self-widen on connect via `ALTER TABLE` — no migration step.
-
-## Degradation
-
-Live mode fails closed rather than faking external effects.
-
-- **Calendar** down → logged, CSV detection continues.
-- **Gmail** failure → that case escalates as a technical error, budget untouched, batch continues.
-  A dead grant is `GmailAuthError`, which names the remedy instead of looking transient.
-- **LLM** → Groq → Gemini → deterministic twin; response shapes validated, not trusted.
-- **Razorpay** → needs both `id` and `short_url`. Test Mode's 30-link cap surfaces as
-  `PaymentLinkLimitError` and degrades to a message-only send.
-- **Vapi** → refuses rather than simulating; no webhook secret means server pushes aren't trusted.
-
-## Compliance posture
-
-The contact window, attempt cap, and language filter are **self-imposed operating policy**, inspired
-by the spirit of RBI's fair-practice principles. **No RBI compliance is claimed** — this collects
-commercial B2B receivables, a different regime from consumer loan recovery. What does apply: **TRAI
-DLT** registration for bulk commercial SMS/WhatsApp and the **DPDP Act 2023** posture for PII. Email
-is the only fully wired channel *because of* DLT — SMS and WhatsApp need registration and template
-approval first, so they are absent rather than half-built.
-
 ## Testing
 
 ```bat
@@ -270,11 +182,3 @@ fixture, so they fail whenever that file is absent — exactly the state `run_al
 Restore or upload a case CSV first. Live delivery is never exercised: Gmail, Razorpay and Vapi are
 injected as fakes, and `conftest.py` pins the contact-window clock so the suite doesn't fail at
 23:00 IST.
-
-## Known gaps
-
-- Six mutating API routes are unauthenticated (see [HTTP surface](#http-surface)).
-- `docs/FUNCTION_REFERENCE.md` links parts 06–10; only `docs/reference/01`–`05` exist.
-- `FAILURES.md` still names the retired `data/failed_subscription_cases.csv`; live code reads one
-  merged `data/recovery_cases.csv` with a `case_type` column.
-- `modules/run_state.py` is empty and nothing imports it.
