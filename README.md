@@ -176,9 +176,3 @@ only; `policy_engine` never reads it.
 python -m pytest
 npm run check      :: inspect → pytest → compileall → validate_csv → repo:check
 ```
-
-Current state: **344 passed, 6 failed.** All six read the real `data/recovery_cases.csv` instead of a
-fixture, so they fail whenever that file is absent — exactly the state `run_all.py` leaves behind.
-Restore or upload a case CSV first. Live delivery is never exercised: Gmail, Razorpay and Vapi are
-injected as fakes, and `conftest.py` pins the contact-window clock so the suite doesn't fail at
-23:00 IST.
