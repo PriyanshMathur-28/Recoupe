@@ -20,63 +20,47 @@ through an action allow-list.
 
 ## Architecture
 
-One lost payment travels down five stages. Each stage answers exactly one question, and can only hand
-its answer to the next stage — never skip ahead, never act on its own.
-
 ```
-  INPUTS                       PIPELINE                          MODULES
+INPUT       recovery_cases.csv · Google Calendar cancellations · Razorpay webhooks
+   │
+   ▼
+DETECT      detector → revenue_event
+            One canonical schema: 11 event types, aging buckets, soft vs hard decline.
+            A bad row returns carrying validation_errors, never as a half-formed event.
+   │
+   ▼
+DIAGNOSE    diagnosis  (the LLM proposes, nothing more)
+            PII redacted before the call · output type-validated on return
+            · deterministic heuristic twin, so no API key is needed to run or test
+   │
+   ▼
+DECIDE      policy_engine.evaluate() → approve | defer | escalate
+            The only decision authority. Never calls an LLM, never sends anything.
+            Returns a machine reason_code + every check it considered.
+   │
+   ▼
+ACT         handlers.handle_action() — allow-list only, anything else raises
+            payments · message_generator (banned-language filter) · invoices · messenger
+   │
+   ▼
+AUDIT       audit_log — append-only SQLite, plus CSV/JSON read projections
 
- recovery_cases.csv    ┌──────────────────────────────┐
- Calendar cancels ────▶│  1  DETECT                   │   detector
- Razorpay webhooks     │     What was lost, and why?  │   revenue_event
-                       └──────────────┬───────────────┘
-                                      ▼
-                       ┌──────────────────────────────┐
-                       │  2  DIAGNOSE                 │   diagnosis
-                       │     What should we try?      │   (LLM proposes only)
-                       └──────────────┬───────────────┘
-                                      ▼
-                       ┌──────────────────────────────┐
-                       │  3  DECIDE                   │   policy_engine
-                       │     Are we allowed to?       │   attempt_tracker
-                       └──────────────┬───────────────┘
-                        approve ──────┤   defer    → retried later
-                                      │   escalate → human review
-                                      ▼
-                       ┌──────────────────────────────┐
-                       │  4  ACT                      │   handlers
-                       │     Do exactly one thing     │   payments · invoices
-                       └──────────────┬───────────────┘   messenger
-                                      ▼
-                       ┌──────────────────────────────┐
-                       │  5  AUDIT                    │   audit_log
-                       │     Record what happened     │   (append-only)
-                       └──────────────────────────────┘
+Parallel channels, same gate and same audit log:
+   voice_calls + vapi_client      the browser/phone conversation
+   flexible_plans + plan_chat     the customer's own negotiation chatbot
+   razorpay_webhooks              the money boundary — attribution decided once
 ```
 
-| # | Stage | The guarantee at that stage |
-|---|---|---|
-| 1 | **Detect** | Every input becomes one canonical `revenue_event`: 11 event types, an aging bucket, and soft (retryable) vs hard (instrument is dead) decline. A bad row comes back carrying `validation_errors`, never as a half-formed event. |
-| 2 | **Diagnose** | The model sees PII-redacted facts and returns a *proposal*. Output is type-validated on return, and a deterministic twin answers the same question when there is no API key or the provider is down. |
-| 3 | **Decide** | `policy_engine.evaluate()` is the only decision authority. It never calls an LLM and never sends anything. It returns `approve / defer / escalate` plus a machine `reason_code` and every check it considered. |
-| 4 | **Act** | `handlers.handle_action()` accepts only allow-listed actions; anything else raises. Messages pass a banned-language filter before delivery. |
-| 5 | **Audit** | Append-only SQLite with no update or delete path. The CSV and JSON copies are regenerated projections, never the record. |
-
-**Voice and flexible plans are not a second pipeline.** They are extra ways to reach the customer at
-stage 4, and they re-enter at stage 3 to get permission and at stage 5 to be recorded — same gate,
-same log. `razorpay_webhooks` is the money boundary: when cash actually lands, attribution to a
-channel is decided once, there.
-
-Rules that recur at every stage:
+Recurring design rules:
 
 - **Authority separation by types.** Six validators coerce model output into closed contracts and
   raise on the rest.
 - **A deterministic twin for every model question**, so a provider outage degrades instead of failing.
-- **Fail closed.** An unrecognised decline reason, an unreadable transcript, or a missing provider
-  routes to a human — it never guesses.
 - **Idempotency at six levels**, each a claim-before-work atomic insert.
 - **Attribution decided once**, at webhook time: newest call vs newest confirmed email, later wins,
   written in the same statement as the amount. Nothing recomputes it later.
+- **Fail closed.** An unrecognised decline reason, an unreadable transcript, or a missing provider
+  routes to a human — it never guesses.
 - **IST is the business clock**; money in transit is `Decimal` + `ROUND_HALF_UP`, sent as integer paise.
 
 ## Setup
@@ -186,37 +170,9 @@ only; `policy_engine` never reads it.
 | `data/recovered_cases.sqlite3` | Confirmed recoveries with attribution |
 | `logs/audit_log.sqlite3` + `.csv` + `.json` | Store of record + projections |
 
-<<<<<<< HEAD
-The audit row is 26 columns (12 legacy fields pinned first, then 14 policy fields), so one row answers
-all four audit questions: what the model proposed, what the gate decided, which rule decided it, and
-whether the customer was contacted. Tables self-widen on connect via `ALTER TABLE` — no migration step.
-
-## Degradation
-
-Live mode fails closed rather than faking external effects.
-
-- **Calendar** down → logged, CSV detection continues.
-- **Gmail** failure → that case escalates as a technical error, budget untouched, batch continues.
-  A dead grant is `GmailAuthError`, which names the remedy instead of looking transient.
-- **LLM** → Groq → Gemini → deterministic twin; response shapes validated, not trusted.
-- **Razorpay** → needs both `id` and `short_url`. Test Mode's 30-link cap surfaces as
-  `PaymentLinkLimitError` and degrades to a message-only send.
-- **Vapi** → refuses rather than simulating; no webhook secret means server pushes aren't trusted.
-
-=======
->>>>>>> 4614a87c8be0523fc94dcf3888c0f672c1c275d7
 ## Testing
 
 ```bat
 python -m pytest
 npm run check      :: inspect → pytest → compileall → validate_csv → repo:check
 ```
-<<<<<<< HEAD
-
-Current state: **344 passed, 6 failed.** All six read the real `data/recovery_cases.csv` instead of a
-fixture, so they fail whenever that file is absent — exactly the state `run_all.py` leaves behind.
-Restore or upload a case CSV first. Live delivery is never exercised: Gmail, Razorpay and Vapi are
-injected as fakes, and `conftest.py` pins the contact-window clock so the suite doesn't fail at
-23:00 IST.
-=======
->>>>>>> 4614a87c8be0523fc94dcf3888c0f672c1c275d7
