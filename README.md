@@ -20,8 +20,6 @@ through an action allow-list.
 
 ## Architecture
 
-## Architecture
-
 ```text
 INPUT
   recovery_cases.csv · Google Calendar · Razorpay webhooks
