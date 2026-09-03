@@ -1,4 +1,4 @@
-# No-Show Recovery Agent
+# AI Revenue Recovery Agent
 
 An AI revenue-recovery system for Indian service businesses. It finds money already lost — no-shows,
 late cancellations, failed subscription charges, expired cards — then works each case through one
