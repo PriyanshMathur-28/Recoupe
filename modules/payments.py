@@ -1,4 +1,3 @@
-"""Razorpay Test Mode payment-link integration."""
 from __future__ import annotations
 
 import math
@@ -20,7 +19,7 @@ class PaymentLinkLimitError(PaymentLinkProviderError):
     This is a *recoverable* condition: callers are expected to degrade to a
     message-only send instead of failing the whole delivery, so it is a distinct
     subclass a caller can catch specifically while still treating every other
-    provider failure as a hard error.
+    provider failureas a hard error.
     """
 
 

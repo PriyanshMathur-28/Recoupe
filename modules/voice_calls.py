@@ -1,47 +1,3 @@
-"""Voice recovery: the ``call_log`` store, outcome classification, and metrics.
-
-Design contract (mirrors the metric-cards spec)
------------------------------------------------
-* **One row per call ATTEMPT, never per case.** A case with three attempts has
-  three ``call_log`` rows. Nothing in this module aggregates by case except the
-  attribution helper, which deliberately takes only the newest attempt.
-* **No stored counters.** Every one of the five dashboard cards is a live query
-  over this table (plus the recovery store). There is no incrementing column
-  anywhere, so a card can never drift from the rows it describes.
-* **One cycle window, applied everywhere.** :func:`start_of_current_cycle`
-  returns the single boundary used by *all* cycle-scoped cards. Cards 2, 3, 4
-  and 5 share it; none of them defines its own window.
-* **Outcome is a closed 4-way enum.** ``promised_to_pay | declined | no_answer
-  | escalated``. "answered" is *not* an outcome — it is an intermediate
-  yes/no fact that decides whether classification runs at all. A browser web
-  call and an outbound phone call converge on the exact same two steps:
-
-      step 1  answered?  -> no  => outcome = "no_answer", classification skipped
-                         -> yes => step 2
-      step 2  the captured speech goes through the SAME typed-JSON 4-way
-              classification, which may only return an ANSWERED outcome.
-
-* **The client's final answer is its own typed question.** The 4-way outcome
-  says what bucket the call falls in; it does not say what the client actually
-  settled on. :func:`extract_final_answer` asks a second, separate typed
-  question — refused / paying now / paying on a named date / needs a human —
-  and captures the client's own closing words. It is persisted next to the
-  outcome so the dashboard can show the answer without ever serving the
-  transcript.
-
-* **Attribution is decided once.** :func:`attribute_recovery` performs the
-  "last action before payment" comparison (newest call vs. newest email send)
-  and returns *both* the winning channel and the winning timestamp, so the
-  payment webhook can persist them together and no later query has to guess a
-  join. See :mod:`modules.razorpay_webhooks`.
-
-An in-flight call (placed, not yet ended) is stored with an empty ``outcome``.
-That is a real third state, not a fifth enum value: the call has no outcome yet.
-Card 3 ("calls placed") counts it, because the attempt genuinely happened. Card
-4 ("answer rate") excludes it from *both* numerator and denominator, because an
-unfinished call is not evidence either way — including it would silently drag
-the rate toward zero while calls are still ringing.
-"""
 from __future__ import annotations
 
 import csv
@@ -59,22 +15,12 @@ from .audit_log import AUDIT_PATH, log_event
 ROOT = Path(__file__).resolve().parents[1]
 VOICE_DB_PATH = ROOT / "data" / "voice_calls.sqlite3"
 
-# The closed outcome enum. Nothing outside this tuple may ever be stored.
 OUTCOMES = ("promised_to_pay", "declined", "no_answer", "escalated")
 
-# How the attempt was made. This is transport, not outcome: no card branches on
-# it, so both transports are counted by identical queries. There is no simulated
-# mode — every row here describes a call a provider actually carried.
-#   web   - Vapi web call in the operator's browser (the primary flow)
-#   live  - outbound telephony call placed through Vapi
 CALL_MODES = ("web", "live")
 
-# Outcomes reachable only when the call was actually answered. The classifier is
-# restricted to these, which is what stops "answered" leaking in as a value.
 ANSWERED_OUTCOMES = ("promised_to_pay", "declined", "escalated")
 
-# Vapi `endedReason` values that mean nobody picked up. Anything else that
-# reached the transcript stage is treated as answered.
 UNANSWERED_REASONS = {
     "customer-did-not-answer",
     "customer-busy",
