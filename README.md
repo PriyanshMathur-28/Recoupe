@@ -20,47 +20,63 @@ through an action allow-list.
 
 ## Architecture
 
-```
-INPUT       recovery_cases.csv · Google Calendar cancellations · Razorpay webhooks
-   │
-   ▼
-DETECT      detector → revenue_event
-            One canonical schema: 11 event types, aging buckets, soft vs hard decline.
-            A bad row returns carrying validation_errors, never as a half-formed event.
-   │
-   ▼
-DIAGNOSE    diagnosis  (the LLM proposes, nothing more)
-            PII redacted before the call · output type-validated on return
-            · deterministic heuristic twin, so no API key is needed to run or test
-   │
-   ▼
-DECIDE      policy_engine.evaluate() → approve | defer | escalate
-            The only decision authority. Never calls an LLM, never sends anything.
-            Returns a machine reason_code + every check it considered.
-   │
-   ▼
-ACT         handlers.handle_action() — allow-list only, anything else raises
-            payments · message_generator (banned-language filter) · invoices · messenger
-   │
-   ▼
-AUDIT       audit_log — append-only SQLite, plus CSV/JSON read projections
+One lost payment travels down five stages. Each stage answers exactly one question, and can only hand
+its answer to the next stage — never skip ahead, never act on its own.
 
-Parallel channels, same gate and same audit log:
-   voice_calls + vapi_client      the browser/phone conversation
-   flexible_plans + plan_chat     the customer's own negotiation chatbot
-   razorpay_webhooks              the money boundary — attribution decided once
+```
+  INPUTS                       PIPELINE                          MODULES
+
+ recovery_cases.csv    ┌──────────────────────────────┐
+ Calendar cancels ────▶│  1  DETECT                   │   detector
+ Razorpay webhooks     │     What was lost, and why?  │   revenue_event
+                       └──────────────┬───────────────┘
+                                      ▼
+                       ┌──────────────────────────────┐
+                       │  2  DIAGNOSE                 │   diagnosis
+                       │     What should we try?      │   (LLM proposes only)
+                       └──────────────┬───────────────┘
+                                      ▼
+                       ┌──────────────────────────────┐
+                       │  3  DECIDE                   │   policy_engine
+                       │     Are we allowed to?       │   attempt_tracker
+                       └──────────────┬───────────────┘
+                        approve ──────┤   defer    → retried later
+                                      │   escalate → human review
+                                      ▼
+                       ┌──────────────────────────────┐
+                       │  4  ACT                      │   handlers
+                       │     Do exactly one thing     │   payments · invoices
+                       └──────────────┬───────────────┘   messenger
+                                      ▼
+                       ┌──────────────────────────────┐
+                       │  5  AUDIT                    │   audit_log
+                       │     Record what happened     │   (append-only)
+                       └──────────────────────────────┘
 ```
 
-Recurring design rules:
+| # | Stage | The guarantee at that stage |
+|---|---|---|
+| 1 | **Detect** | Every input becomes one canonical `revenue_event`: 11 event types, an aging bucket, and soft (retryable) vs hard (instrument is dead) decline. A bad row comes back carrying `validation_errors`, never as a half-formed event. |
+| 2 | **Diagnose** | The model sees PII-redacted facts and returns a *proposal*. Output is type-validated on return, and a deterministic twin answers the same question when there is no API key or the provider is down. |
+| 3 | **Decide** | `policy_engine.evaluate()` is the only decision authority. It never calls an LLM and never sends anything. It returns `approve / defer / escalate` plus a machine `reason_code` and every check it considered. |
+| 4 | **Act** | `handlers.handle_action()` accepts only allow-listed actions; anything else raises. Messages pass a banned-language filter before delivery. |
+| 5 | **Audit** | Append-only SQLite with no update or delete path. The CSV and JSON copies are regenerated projections, never the record. |
+
+**Voice and flexible plans are not a second pipeline.** They are extra ways to reach the customer at
+stage 4, and they re-enter at stage 3 to get permission and at stage 5 to be recorded — same gate,
+same log. `razorpay_webhooks` is the money boundary: when cash actually lands, attribution to a
+channel is decided once, there.
+
+Rules that recur at every stage:
 
 - **Authority separation by types.** Six validators coerce model output into closed contracts and
   raise on the rest.
 - **A deterministic twin for every model question**, so a provider outage degrades instead of failing.
+- **Fail closed.** An unrecognised decline reason, an unreadable transcript, or a missing provider
+  routes to a human — it never guesses.
 - **Idempotency at six levels**, each a claim-before-work atomic insert.
 - **Attribution decided once**, at webhook time: newest call vs newest confirmed email, later wins,
   written in the same statement as the amount. Nothing recomputes it later.
-- **Fail closed.** An unrecognised decline reason, an unreadable transcript, or a missing provider
-  routes to a human — it never guesses.
 - **IST is the business clock**; money in transit is `Decimal` + `ROUND_HALF_UP`, sent as integer paise.
 
 ## Setup
@@ -188,37 +204,6 @@ model's job. Trimmed evidence sets `evidence_scope.complete = false` so the mode
 never executes a recovery action from chat. The merchant's uploaded business document grounds *tone*
 only; `policy_engine` never reads it.
 
-## HTTP surface
-
-Pages: `GET /` (public landing), `/dashboard` + `/clients` (session-gated),
-`/recover/flexible-plan/<token>` (customer, bearer token), `/login`, `/logout`.
-
-Reads: `/api/clients`, `/api/clients/<id>/calls`, `/api/clients/<id>/audit-export`,
-`/api/data-status`, `/api/merchant-profile`, `/api/revenue-autopsy/context`, `/api/voice/config`
-(never the private key), `/api/voice/metrics`, `/api/flexible-plan/<token>`.
-
-Webhooks: `POST /webhooks/razorpay` verifies HMAC-SHA256 over the raw body in constant time and
-dedupes on `X-Razorpay-Event-Id`. `POST /webhooks/vapi` checks `X-Vapi-Secret`.
-
-Mutations, by what the server actually enforces:
-
-| Enforcement | Routes |
-|---|---|
-| Session + CSRF | `POST`/`DELETE /api/merchant-profile`, `/dashboard/review/<id>/resolve`, `/dashboard/cases/retry`, `/dashboard/waitlist*` |
-| Session only | `POST /api/upload-csv` |
-| **Neither** | `/api/clients/<id>/send-email`, `/api/clients/send-bulk`, `/api/clients/<id>/simulate-recovery`, `/api/revenue-autopsy/chat`, `/api/voice/start-call`, `/api/voice/complete-call` |
-| Bearer token by design | `/api/flexible-plan/<token>/chat`, `/api/flexible-plan/<token>/confirm` |
-
-> **Security gap, not a design choice.** Those six unenforced routes include every route that emails a
-> customer, mints a link, or writes a recovery record. The console sends `X-CSRF-Token`; those
-> handlers never verify it. Keep the app on `127.0.0.1` (the default) or add
-> `_require_mutation_access()` before exposing it. There is also no rate limiting, and
-> `DASHBOARD_PASSWORD` is a single shared credential.
-
-`send-email` does get error semantics right: operator-fixable → 4xx; dependency down → `503` with a
-machine-readable `code` (`gmail_authorization_expired`, `gmail_unavailable`,
-`payment_link_unavailable`, `delivery_failed`). Nothing escapes as a bare HTML 500.
-
 ## Storage
 
 | Path | Contents |
@@ -249,15 +234,6 @@ Live mode fails closed rather than faking external effects.
   `PaymentLinkLimitError` and degrades to a message-only send.
 - **Vapi** → refuses rather than simulating; no webhook secret means server pushes aren't trusted.
 
-## Compliance posture
-
-The contact window, attempt cap, and language filter are **self-imposed operating policy**, inspired
-by the spirit of RBI's fair-practice principles. **No RBI compliance is claimed** — this collects
-commercial B2B receivables, a different regime from consumer loan recovery. What does apply: **TRAI
-DLT** registration for bulk commercial SMS/WhatsApp and the **DPDP Act 2023** posture for PII. Email
-is the only fully wired channel *because of* DLT — SMS and WhatsApp need registration and template
-approval first, so they are absent rather than half-built.
-
 ## Testing
 
 ```bat
@@ -270,11 +246,3 @@ fixture, so they fail whenever that file is absent — exactly the state `run_al
 Restore or upload a case CSV first. Live delivery is never exercised: Gmail, Razorpay and Vapi are
 injected as fakes, and `conftest.py` pins the contact-window clock so the suite doesn't fail at
 23:00 IST.
-
-## Known gaps
-
-- Six mutating API routes are unauthenticated (see [HTTP surface](#http-surface)).
-- `docs/FUNCTION_REFERENCE.md` links parts 06–10; only `docs/reference/01`–`05` exist.
-- `FAILURES.md` still names the retired `data/failed_subscription_cases.csv`; live code reads one
-  merged `data/recovery_cases.csv` with a `case_type` column.
-- `modules/run_state.py` is empty and nothing imports it.
