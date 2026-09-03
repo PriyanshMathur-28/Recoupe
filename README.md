@@ -51,18 +51,6 @@ Parallel channels, same gate and same audit log:
    razorpay_webhooks              the money boundary — attribution decided once
 ```
 
-Recurring design rules:
-
-- **Authority separation by types.** Six validators coerce model output into closed contracts and
-  raise on the rest.
-- **A deterministic twin for every model question**, so a provider outage degrades instead of failing.
-- **Idempotency at six levels**, each a claim-before-work atomic insert.
-- **Attribution decided once**, at webhook time: newest call vs newest confirmed email, later wins,
-  written in the same statement as the amount. Nothing recomputes it later.
-- **Fail closed.** An unrecognised decline reason, an unreadable transcript, or a missing provider
-  routes to a human — it never guesses.
-- **IST is the business clock**; money in transit is `Decimal` + `ROUND_HALF_UP`, sent as integer paise.
-
 ## Setup
 
 Python 3.10+. Node 18+ only if you rebuild the frontend.
