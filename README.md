@@ -20,35 +20,43 @@ through an action allow-list.
 
 ## Architecture
 
-```
-INPUT       recovery_cases.csv · Google Calendar cancellations · Razorpay webhooks
-   │
-   ▼
-DETECT      detector → revenue_event
-            One canonical schema: 11 event types, aging buckets, soft vs hard decline.
-            A bad row returns carrying validation_errors, never as a half-formed event.
-   │
-   ▼
-DIAGNOSE    diagnosis  (the LLM proposes, nothing more)
-            PII redacted before the call · output type-validated on return
-            · deterministic heuristic twin, so no API key is needed to run or test
-   │
-   ▼
-DECIDE      policy_engine.evaluate() → approve | defer | escalate
-            The only decision authority. Never calls an LLM, never sends anything.
-            Returns a machine reason_code + every check it considered.
-   │
-   ▼
-ACT         handlers.handle_action() — allow-list only, anything else raises
-            payments · message_generator (banned-language filter) · invoices · messenger
-   │
-   ▼
-AUDIT       audit_log — append-only SQLite, plus CSV/JSON read projections
+## Architecture
 
-Parallel channels, same gate and same audit log:
-   voice_calls + vapi_client      the browser/phone conversation
-   flexible_plans + plan_chat     the customer's own negotiation chatbot
-   razorpay_webhooks              the money boundary — attribution decided once
+```text
+INPUT
+  recovery_cases.csv · Google Calendar · Razorpay webhooks
+      │
+      ▼
+DETECT
+  Find revenue-loss events
+  → failed payments · cancellations · no-shows · overdue payments
+      │
+      ▼
+UNDERSTAND
+  AI diagnoses what happened
+  → PII redacted · response validated · fallback rules if AI is unavailable
+      │
+      ▼
+DECIDE
+  policy_engine.evaluate()
+  → approve | defer | escalate
+  → business rules are the only decision authority
+      │
+      ▼
+ACT
+  handlers.handle_action()
+  → send message · create payment link · retry payment
+  → charge no-show fee · reschedule · escalate
+      │
+      ▼
+AUDIT
+  audit_log
+  → record the event · decision · action · result
+
+Parallel channels, same decision gate and audit trail:
+  voice_calls + Vapi          customer voice conversation
+  plan_chat + flexible_plans  payment-plan negotiation
+  Razorpay webhooks            payment confirmation & recovery attribution
 ```
 
 ## Setup
