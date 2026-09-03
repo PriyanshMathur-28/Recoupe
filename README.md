@@ -50,11 +50,6 @@ ACT
 AUDIT
   audit_log
   → record the event · decision · action · result
-
-Parallel channels, same decision gate and audit trail:
-  voice_calls + Vapi          customer voice conversation
-  plan_chat + flexible_plans  payment-plan negotiation
-  Razorpay webhooks            payment confirmation & recovery attribution
 ```
 
 ## Setup
